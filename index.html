@@ -1,0 +1,1090 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Student Manager</title>
+<link rel="icon" href="data:,">
+<style>
+  html, body { margin: 0; padding: 0; background: #EEF1EA; }
+  #root { min-height: 100vh; }
+</style>
+
+<!-- Import map: lets bare specifiers like "react" resolve to CDN ES modules -->
+<script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@18.3.1",
+    "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
+    "lucide-react": "https://esm.sh/lucide-react@0.383.0?external=react",
+    "xlsx": "https://esm.sh/xlsx@0.18.5"
+  }
+}
+</script>
+
+<!-- Babel Standalone: transpiles JSX in the browser, no build step needed -->
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-type="module" data-presets="react">
+import React, { useState, useEffect, useRef, useMemo } from "react";
+import ReactDOM from "react-dom/client";
+import * as XLSX from "xlsx";
+import {
+  Users, CalendarCheck, BookOpenCheck, BarChart3, Plus, X, Search,
+  CreditCard, Wallet, Trash2, ChevronRight, AlertCircle, Loader2,
+  ArrowLeft, CheckCircle2, Clock, Sun, SunMedium, GraduationCap,
+  Download, FileSpreadsheet, ExternalLink, CheckCircle, RefreshCw,
+  Copy, Check, Cloud
+} from "lucide-react";
+
+/* ---------- config ---------- */
+
+const TYPE_CONFIG = {
+  course:    { label: "Regular course",  unitName: "session",  defaultUnits: 10, hint: "1.5 hrs / session", icon: BookOpenCheck },
+  camp_full: { label: "Full-day camp",    unitName: "day",       defaultUnits: 5,  hint: "Per day",          icon: Sun },
+  camp_half: { label: "Half-day camp",    unitName: "half-day",  defaultUnits: 5,  hint: "Per half-day",     icon: SunMedium },
+  workshop:  { label: "Workshop",         unitName: "hr",        defaultUnits: 3,  hint: "Per hour",         icon: Clock },
+};
+
+const CC_RATE = 0.03;
+const STORAGE_KEY = "school-data";
+
+const APPS_SCRIPT_CODE = `function doPost(e) {
+  var payload = JSON.parse(e.postData.contents);
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  writeSheet(ss, 'Students',
+    ['ID', 'Name', 'Phone', 'Note'],
+    payload.students.map(function (s) { return [s.id, s.name, s.phone, s.note]; })
+  );
+
+  writeSheet(ss, 'Purchases',
+    ['ID', 'Student', 'Subject', 'Type', 'Total Units', 'Unit', 'Price Paid',
+     'Payment Method', 'CC Fee (3%)', 'Total Collected', 'Price / Unit',
+     'Purchase Date', 'Used', 'Remaining'],
+    payload.purchases.map(function (p) {
+      return [p.id, p.studentName, p.subject, p.type, p.totalUnits, p.unitName,
+        p.pricePaid, p.paymentMethod, p.ccFee, p.totalCollected, p.pricePerUnit,
+        p.purchaseDate, p.used, p.remaining];
+    })
+  );
+
+  writeSheet(ss, 'Attendance',
+    ['Date', 'Student', 'Subject', 'Units Used', 'Unit', 'Note'],
+    payload.attendance.map(function (a) {
+      return [a.date, a.studentName, a.subject, a.unitsUsed, a.unitName, a.note];
+    })
+  );
+
+  return ContentService.createTextOutput('OK');
+}
+
+function writeSheet(ss, name, headers, rows) {
+  var sheet = ss.getSheetByName(name);
+  if (!sheet) sheet = ss.insertSheet(name);
+  sheet.clear();
+  sheet.appendRow(headers);
+  if (rows.length) sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
+  sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold');
+  sheet.autoResizeColumns(1, headers.length);
+}`;
+
+/* ---------- local storage helpers (this app now runs as a normal
+   website, so it uses the browser's own localStorage — data lives
+   in this browser only, unless you also sync to a Google Sheet) --- */
+
+function storageGet(key) {
+  try {
+    const v = localStorage.getItem(key);
+    return v ? { value: v } : null;
+  } catch (e) {
+    return null;
+  }
+}
+function storageSet(key, value) {
+  try {
+    localStorage.setItem(key, value);
+    return { key, value };
+  } catch (e) {
+    return null;
+  }
+}
+
+/* ---------- helpers ---------- */
+
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+const fmtBaht = (n) => "฿" + Math.round(n || 0).toLocaleString("en-US");
+const fmtNum = (n) => (Math.round(n * 100) / 100).toLocaleString("en-US");
+const todayStr = () => new Date().toISOString().slice(0, 10);
+const fmtDate = (d) =>
+  new Date(d + "T00:00:00").toLocaleDateString("en-US", { day: "numeric", month: "short", year: "2-digit" });
+const fmtDateTime = (ts) =>
+  ts ? new Date(ts).toLocaleString("en-US", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "never";
+
+function ccFeeOf(price, method) {
+  return method === "credit" ? price * CC_RATE : 0;
+}
+
+/* ---------- root ---------- */
+
+function App() {
+  const [loading, setLoading] = useState(true);
+  const [students, setStudents] = useState([]);
+  const [purchases, setPurchases] = useState([]);
+  const [attendance, setAttendance] = useState([]);
+  const [sheetUrl, setSheetUrl] = useState("");
+  const [autoSync, setAutoSync] = useState(false);
+  const [lastSynced, setLastSynced] = useState(null);
+  const [tab, setTab] = useState("checkin");
+  const [selectedStudentId, setSelectedStudentId] = useState(null);
+  const loadedRef = useRef(false);
+
+  useEffect(() => {
+    const res = storageGet(STORAGE_KEY);
+    if (res && res.value) {
+      try {
+        const data = JSON.parse(res.value);
+        setStudents(data.students || []);
+        setPurchases(data.purchases || []);
+        setAttendance(data.attendance || []);
+        setSheetUrl(data.sheetUrl || "");
+        setAutoSync(!!data.autoSync);
+        setLastSynced(data.lastSynced || null);
+      } catch (e) {}
+    }
+    loadedRef.current = true;
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    if (!loadedRef.current) return;
+    const t = setTimeout(() => {
+      storageSet(STORAGE_KEY, JSON.stringify({ students, purchases, attendance, sheetUrl, autoSync, lastSynced }));
+      if (autoSync && sheetUrl) doSync();
+    }, 350);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line
+  }, [students, purchases, attendance]);
+
+  const purchasesByStudent = useMemo(() => {
+    const m = {};
+    purchases.forEach((p) => { (m[p.studentId] ||= []).push(p); });
+    return m;
+  }, [purchases]);
+
+  const usedUnitsByPurchase = useMemo(() => {
+    const m = {};
+    attendance.forEach((a) => { m[a.purchaseId] = (m[a.purchaseId] || 0) + a.unitsUsed; });
+    return m;
+  }, [attendance]);
+
+  function remainingOf(p) {
+    return Math.max(0, p.totalUnits - (usedUnitsByPurchase[p.id] || 0));
+  }
+  function studentName(id) {
+    return students.find((s) => s.id === id)?.name || "—";
+  }
+
+  async function doSync() {
+    if (!sheetUrl) return false;
+    const payload = {
+      generatedAt: new Date().toISOString(),
+      students: students.map((s) => ({ id: s.id, name: s.name, phone: s.phone || "", note: s.note || "" })),
+      purchases: purchases.map((p) => {
+        const cfg = TYPE_CONFIG[p.type];
+        const fee = ccFeeOf(p.pricePaid, p.paymentMethod);
+        const used = usedUnitsByPurchase[p.id] || 0;
+        return {
+          id: p.id, studentName: studentName(p.studentId), subject: p.subject, type: cfg.label,
+          totalUnits: p.totalUnits, unitName: cfg.unitName, pricePaid: p.pricePaid,
+          paymentMethod: p.paymentMethod, ccFee: Math.round(fee), totalCollected: Math.round(p.pricePaid + fee),
+          pricePerUnit: Math.round((p.pricePaid / p.totalUnits) * 100) / 100,
+          purchaseDate: p.purchaseDate, used, remaining: Math.max(0, p.totalUnits - used),
+        };
+      }),
+      attendance: attendance.map((a) => {
+        const p = purchases.find((x) => x.id === a.purchaseId);
+        return {
+          date: a.date, studentName: studentName(a.studentId), subject: p?.subject || "",
+          unitsUsed: a.unitsUsed, unitName: p ? TYPE_CONFIG[p.type].unitName : "", note: a.note || "",
+        };
+      }),
+    };
+    try {
+      await fetch(sheetUrl, {
+        method: "POST",
+        mode: "no-cors",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify(payload),
+      });
+      const now = Date.now();
+      setLastSynced(now);
+      storageSet(STORAGE_KEY, JSON.stringify({ students, purchases, attendance, sheetUrl, autoSync, lastSynced: now }));
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  const ctx = {
+    students, setStudents, purchases, setPurchases, attendance, setAttendance,
+    purchasesByStudent, usedUnitsByPurchase, remainingOf, studentName,
+    selectedStudentId, setSelectedStudentId, setTab,
+    sheetUrl, setSheetUrl, autoSync, setAutoSync, lastSynced, doSync,
+  };
+
+  if (loading) {
+    return (
+      <div className="w-full min-h-screen flex items-center justify-center" style={{ background: "var(--bg)" }}>
+        <GlobalStyle />
+        <div className="flex flex-col items-center gap-3" style={{ color: "var(--ink-soft)" }}>
+          <Loader2 className="animate-spin" size={28} />
+          <div style={{ fontFamily: "var(--font-body)" }}>Loading data…</div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="w-full min-h-screen" style={{ background: "var(--bg)", fontFamily: "var(--font-body)" }}>
+      <GlobalStyle />
+      <Header tab={tab} setTab={setTab} />
+      <main className="max-w-5xl mx-auto px-4 pb-16 pt-5">
+        {tab === "checkin" && <CheckInView {...ctx} />}
+        {tab === "students" && <StudentsView {...ctx} />}
+        {tab === "purchases" && <PurchasesView {...ctx} />}
+        {tab === "reports" && <ReportsView {...ctx} />}
+        {tab === "backup" && <BackupView {...ctx} />}
+      </main>
+    </div>
+  );
+}
+
+/* ---------- style ---------- */
+
+function GlobalStyle() {
+  return (
+    <style>{`
+      @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+      *{ box-sizing: border-box; }
+      :root{
+        --bg: #EEF1EA; --paper: #FFFFFF; --ink: #1E2A2E; --ink-soft: #5B6B67; --line: #DADFD3;
+        --teal: #1F6F63; --teal-dark: #164F46; --teal-tint: #E4EFEA;
+        --amber: #DE9A34; --amber-tint: #FBF0DC; --coral: #C15A4F; --coral-tint: #F7E7E4;
+        --font-display: 'Fraunces', serif; --font-body: 'Inter', sans-serif; --font-mono: 'IBM Plex Mono', monospace;
+      }
+      body { font-family: var(--font-body); }
+      .fdisplay{ font-family: var(--font-display); }
+      .fmono{ font-family: var(--font-mono); }
+      .w-full{width:100%} .min-h-screen{min-height:100vh} .flex{display:flex} .flex-col{flex-direction:column}
+      .items-center{align-items:center} .justify-center{justify-content:center} .justify-between{justify-content:space-between}
+      .gap-1{gap:4px} .gap-1\\.5{gap:6px} .gap-2{gap:8px} .gap-2\\.5{gap:10px} .gap-3{gap:12px} .gap-3\\.5{gap:14px} .gap-4{gap:16px} .gap-5{gap:20px}
+      .flex-wrap{flex-wrap:wrap} .flex-1{flex:1 1 0%} .shrink-0{flex-shrink:0} .min-w-0{min-width:0}
+      .text-center{text-align:center} .text-left{text-align:left} .relative{position:relative} .fixed{position:fixed}
+      .inset-0{top:0;right:0;bottom:0;left:0} .z-50{z-index:50} .overflow-hidden{overflow:hidden} .overflow-y-auto{overflow-y:auto} .overflow-x-auto{overflow-x:auto}
+      .rounded-full{border-radius:9999px} .rounded-lg{border-radius:10px} .rounded-xl{border-radius:14px}
+      .font-semibold{font-weight:600} .font-medium{font-weight:500} .font-bold{font-weight:700}
+      .text-xs{font-size:12px} .text-sm{font-size:14px} .text-base{font-size:16px}
+      .truncate{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .grid{display:grid} .grid-cols-2{grid-template-columns:repeat(2,minmax(0,1fr))}
+      .divide-y > * + *{border-top:1px solid var(--line)}
+      .underline{text-decoration:underline} .whitespace-nowrap{white-space:nowrap}
+      .max-w-5xl{max-width:1024px} .mx-auto{margin-left:auto;margin-right:auto}
+      .p-3{padding:12px} .p-3\\.5{padding:14px} .p-4{padding:16px} .p-5{padding:20px} .p-1{padding:4px} .p-1\\.5{padding:6px}
+      .px-3{padding-left:12px;padding-right:12px} .px-3\\.5{padding-left:14px;padding-right:14px} .px-4{padding-left:16px;padding-right:16px} .px-5{padding-left:20px;padding-right:20px}
+      .py-1\\.5{padding-top:6px;padding-bottom:6px} .py-2{padding-top:8px;padding-bottom:8px} .py-2\\.5{padding-top:10px;padding-bottom:10px} .py-3{padding-top:12px;padding-bottom:12px}
+      .pt-1{padding-top:4px} .pt-3{padding-top:12px} .pt-5{padding-top:20px} .pb-1{padding-bottom:4px} .pb-16{padding-bottom:64px} .pb-3{padding-bottom:12px}
+      .mt-0\\.5{margin-top:2px} .mt-1{margin-top:4px} .mt-1\\.5{margin-top:6px} .mt-3{margin-top:12px} .mt-4{margin-top:16px} .-mt-3{margin-top:-12px}
+      .mb-0\\.5{margin-bottom:2px} .mb-1{margin-bottom:4px} .mb-1\\.5{margin-bottom:6px} .mb-2{margin-bottom:8px} .mb-4{margin-bottom:16px}
+      .ml-1{margin-left:4px}
+      .w-fit{width:fit-content} .h-2{height:8px} .h-full{height:100%}
+      .animate-spin{animation:spin 1s linear infinite} @keyframes spin{to{transform:rotate(360deg)}}
+      .stamp-pop { animation: stampIn .35s cubic-bezier(.2,1.4,.4,1); }
+      @keyframes stampIn { 0%{transform:scale(1.6) rotate(-8deg);opacity:0} 60%{transform:scale(.95) rotate(-8deg);opacity:1} 100%{transform:scale(1) rotate(-8deg);opacity:1} }
+      .card { background: var(--paper); border: 1px solid var(--line); border-radius: 14px; }
+      .btn { border-radius: 10px; font-weight: 600; border:none; cursor:pointer; transition: transform .12s ease, opacity .12s ease; font-family: var(--font-body); }
+      .btn:active { transform: scale(0.97); }
+      .btn-primary { background: var(--teal); color: white; }
+      .btn-primary:hover { background: var(--teal-dark); }
+      .btn-ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+      .btn-ghost:hover { background: var(--teal-tint); }
+      .btn-danger { color: var(--coral); background:none; border:none; cursor:pointer; }
+      .input { border: 1px solid var(--line); border-radius: 10px; background: var(--paper); color: var(--ink); font-family: var(--font-body); }
+      .input:focus { outline: none; border-color: var(--teal); box-shadow: 0 0 0 3px var(--teal-tint); }
+      .tab-btn { border-radius: 10px; font-weight: 600; border:none; cursor:pointer; background:transparent; font-family: var(--font-body); }
+      .tab-btn.active { background: var(--teal); color: white; }
+      .tab-btn:not(.active) { color: var(--ink-soft); }
+      .tab-btn:not(.active):hover { background: var(--teal-tint); }
+      .badge { border-radius: 999px; font-size: 12px; font-weight: 600; padding: 2px 9px; }
+      button { cursor: pointer; }
+      a { text-decoration: none; }
+      ::-webkit-scrollbar { height: 8px; width: 8px; }
+      ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 8px; }
+    `}</style>
+  );
+}
+
+/* ---------- header ---------- */
+
+function Header({ tab, setTab }) {
+  const tabs = [
+    { id: "checkin", label: "Check-in", icon: CalendarCheck },
+    { id: "students", label: "Students", icon: Users },
+    { id: "purchases", label: "Packages", icon: BookOpenCheck },
+    { id: "reports", label: "Reports", icon: BarChart3 },
+    { id: "backup", label: "Backup", icon: Cloud },
+  ];
+  return (
+    <div style={{ background: "var(--paper)", borderBottom: "1px solid var(--line)" }}>
+      <div className="max-w-5xl mx-auto px-4 pt-5 pb-3">
+        <div className="flex items-center gap-2.5">
+          <div className="flex items-center justify-center rounded-xl" style={{ width: 40, height: 40, background: "var(--teal-tint)", color: "var(--teal-dark)" }}>
+            <GraduationCap size={22} />
+          </div>
+          <div>
+            <div className="fdisplay" style={{ fontSize: 21, fontWeight: 700, color: "var(--ink)", lineHeight: 1.1 }}>Student Manager</div>
+            <div className="fmono" style={{ fontSize: 11.5, color: "var(--ink-soft)" }}>Enrichment school · auto-saved on this device</div>
+          </div>
+        </div>
+        <div className="flex gap-1.5 mt-4 overflow-x-auto pb-1">
+          {tabs.map((t) => {
+            const Icon = t.icon;
+            return (
+              <button key={t.id} onClick={() => setTab(t.id)} className={`tab-btn flex items-center gap-1.5 px-3.5 py-2 text-sm whitespace-nowrap ${tab === t.id ? "active" : ""}`}>
+                <Icon size={16} /> {t.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- shared bits ---------- */
+
+function Empty({ icon: Icon, title, sub }) {
+  return (
+    <div className="card flex flex-col items-center justify-center text-center" style={{ padding: "56px 24px" }}>
+      <div className="flex items-center justify-center rounded-full mb-3" style={{ width: 52, height: 52, background: "var(--teal-tint)", color: "var(--teal-dark)" }}>
+        <Icon size={24} />
+      </div>
+      <div className="font-semibold" style={{ color: "var(--ink)" }}>{title}</div>
+      {sub && <div className="text-sm mt-1" style={{ color: "var(--ink-soft)", maxWidth: 320 }}>{sub}</div>}
+    </div>
+  );
+}
+
+function RemainingBadge({ remaining, total, unitName }) {
+  let bg = "var(--teal-tint)", color = "var(--teal-dark)";
+  if (remaining === 0) { bg = "var(--coral-tint)"; color = "var(--coral)"; }
+  else if (remaining <= Math.max(1, Math.round(total * 0.2))) { bg = "var(--amber-tint)"; color = "#92651A"; }
+  return (
+    <span className="badge fmono" style={{ background: bg, color }}>
+      {fmtNum(remaining)}/{fmtNum(total)} {unitName}{remaining !== 1 ? "s" : ""} left
+    </span>
+  );
+}
+
+function TypeIcon({ type, size = 15 }) {
+  const Icon = TYPE_CONFIG[type]?.icon || BookOpenCheck;
+  return <Icon size={size} />;
+}
+
+/* =========================================================
+   CHECK-IN VIEW
+   ========================================================= */
+
+function CheckInView({ students, purchases, attendance, setAttendance, purchasesByStudent, remainingOf, studentName, setTab }) {
+  const [date, setDate] = useState(todayStr());
+  const [adding, setAdding] = useState(false);
+  const [justStamped, setJustStamped] = useState(null);
+
+  const todays = attendance.filter((a) => a.date === date).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+
+  function removeEntry(id) {
+    setAttendance((prev) => prev.filter((a) => a.id !== id));
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="card p-4 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <div className="text-xs font-semibold" style={{ color: "var(--ink-soft)" }}>Check-in date</div>
+          <input type="date" className="input fmono text-sm px-3 py-1.5 mt-1" value={date} onChange={(e) => setDate(e.target.value)} />
+        </div>
+        <button className="btn btn-primary flex items-center gap-1.5 px-4 py-2.5 text-sm" onClick={() => setAdding(true)}>
+          <Plus size={17} /> Check in a student
+        </button>
+      </div>
+
+      {students.length === 0 && <Empty icon={Users} title="No students yet" sub="Add your first student on the Students tab" />}
+      {students.length > 0 && todays.length === 0 && (
+        <Empty icon={CalendarCheck} title="No check-ins yet today" sub={`Tap "Check in a student" to record who came on ${fmtDate(date)}`} />
+      )}
+
+      <div className="flex flex-col gap-2.5">
+        {todays.map((a) => {
+          const p = purchases.find((x) => x.id === a.purchaseId);
+          return (
+            <div key={a.id} className={`card p-3.5 flex items-center justify-between gap-3 ${justStamped === a.id ? "stamp-pop" : ""}`}>
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="flex items-center justify-center rounded-full shrink-0" style={{ width: 36, height: 36, background: "var(--teal)", color: "white" }}>
+                  <CheckCircle2 size={18} />
+                </div>
+                <div className="min-w-0">
+                  <div className="font-semibold truncate" style={{ color: "var(--ink)" }}>{studentName(a.studentId)}</div>
+                  <div className="text-xs flex items-center gap-1.5 mt-0.5" style={{ color: "var(--ink-soft)" }}>
+                    <TypeIcon type={p?.type} size={13} />
+                    {p ? `${p.subject} · used ${fmtNum(a.unitsUsed)} ${TYPE_CONFIG[p.type].unitName}${a.unitsUsed !== 1 ? "s" : ""}` : "Package not found"}
+                  </div>
+                </div>
+              </div>
+              <button className="btn-danger p-1.5" onClick={() => removeEntry(a.id)} title="Remove this entry"><Trash2 size={16} /></button>
+            </div>
+          );
+        })}
+      </div>
+
+      {adding && (
+        <CheckInModal
+          date={date} students={students} purchasesByStudent={purchasesByStudent} remainingOf={remainingOf}
+          onClose={() => setAdding(false)}
+          onGotoPurchases={() => { setAdding(false); setTab("purchases"); }}
+          onSubmit={(entry) => {
+            const id = uid();
+            setAttendance((prev) => [...prev, { ...entry, id, date, createdAt: Date.now() }]);
+            setAdding(false);
+            setJustStamped(id);
+            setTimeout(() => setJustStamped(null), 500);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function CheckInModal({ date, students, purchasesByStudent, remainingOf, onClose, onSubmit, onGotoPurchases }) {
+  const [query, setQuery] = useState("");
+  const [studentId, setStudentId] = useState(null);
+  const [purchaseId, setPurchaseId] = useState(null);
+  const [units, setUnits] = useState(1);
+  const [note, setNote] = useState("");
+
+  const filtered = students.filter((s) => s.name.toLowerCase().includes(query.toLowerCase()));
+  const activePurchases = studentId ? (purchasesByStudent[studentId] || []).filter((p) => remainingOf(p) > 0) : [];
+  const chosen = activePurchases.find((p) => p.id === purchaseId);
+
+  useEffect(() => { setPurchaseId(null); }, [studentId]);
+  useEffect(() => { if (chosen) setUnits(1); }, [purchaseId]);
+
+  return (
+    <Modal onClose={onClose} title="Check in a student" wide>
+      <div className="flex flex-col gap-4">
+        {!studentId ? (
+          <div>
+            <div className="relative">
+              <Search size={16} style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: "var(--ink-soft)" }} />
+              <input className="input w-full text-sm" style={{ paddingLeft: 36, paddingRight: 12, paddingTop: 10, paddingBottom: 10 }} placeholder="Search student name…" value={query} onChange={(e) => setQuery(e.target.value)} autoFocus />
+            </div>
+            <div className="flex flex-col gap-1.5 mt-3" style={{ maxHeight: 256, overflowY: "auto" }}>
+              {filtered.length === 0 && <div className="text-sm text-center" style={{ color: "var(--ink-soft)", padding: "24px 0" }}>No students found</div>}
+              {filtered.map((s) => (
+                <button key={s.id} onClick={() => setStudentId(s.id)} className="flex items-center justify-between px-3.5 py-2.5 rounded-lg text-left" style={{ border: "1px solid var(--line)", background: "transparent" }}>
+                  <span className="font-medium" style={{ color: "var(--ink)" }}>{s.name}</span>
+                  <ChevronRight size={16} style={{ color: "var(--ink-soft)" }} />
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <>
+            <button className="flex items-center gap-1 text-sm font-medium w-fit" style={{ color: "var(--teal-dark)", background: "none", border: "none" }} onClick={() => setStudentId(null)}>
+              <ArrowLeft size={14} /> Change student
+            </button>
+            <div className="text-sm" style={{ color: "var(--ink-soft)" }}>Student</div>
+            <div className="fdisplay -mt-3" style={{ fontSize: 19, fontWeight: 600, color: "var(--ink)" }}>{students.find((s) => s.id === studentId)?.name}</div>
+
+            {activePurchases.length === 0 ? (
+              <div className="card p-4 flex items-start gap-2.5" style={{ background: "var(--amber-tint)", border: "none" }}>
+                <AlertCircle size={18} style={{ color: "#92651A" }} className="shrink-0 mt-0.5" />
+                <div className="text-sm" style={{ color: "#5A4118" }}>
+                  This student has no packages with remaining sessions.
+                  <button className="font-semibold underline block mt-1" style={{ background: "none", border: "none", color: "#5A4118" }} onClick={onGotoPurchases}>Go add a package →</button>
+                </div>
+              </div>
+            ) : (
+              <div>
+                <div className="text-xs font-semibold mb-1.5" style={{ color: "var(--ink-soft)" }}>Choose a package to use</div>
+                <div className="flex flex-col gap-2">
+                  {activePurchases.map((p) => {
+                    const rem = remainingOf(p);
+                    return (
+                      <button key={p.id} onClick={() => setPurchaseId(p.id)} className="flex items-center justify-between px-3.5 py-2.5 rounded-lg text-left"
+                        style={{ border: purchaseId === p.id ? "2px solid var(--teal)" : "1px solid var(--line)", background: purchaseId === p.id ? "var(--teal-tint)" : "transparent" }}>
+                        <div className="flex items-center gap-2 min-w-0">
+                          <TypeIcon type={p.type} />
+                          <div className="min-w-0">
+                            <div className="font-medium truncate" style={{ color: "var(--ink)" }}>{p.subject}</div>
+                            <div className="text-xs" style={{ color: "var(--ink-soft)" }}>{TYPE_CONFIG[p.type].label}</div>
+                          </div>
+                        </div>
+                        <RemainingBadge remaining={rem} total={p.totalUnits} unitName={TYPE_CONFIG[p.type].unitName} />
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {chosen && (
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <div className="text-xs font-semibold mb-1.5" style={{ color: "var(--ink-soft)" }}>Units used ({TYPE_CONFIG[chosen.type].unitName})</div>
+                  <input type="number" min="0.5" step="0.5" max={remainingOf(chosen)} className="input w-full px-3 py-2 text-sm fmono" value={units} onChange={(e) => setUnits(Number(e.target.value))} />
+                </div>
+                <div>
+                  <div className="text-xs font-semibold mb-1.5" style={{ color: "var(--ink-soft)" }}>Note (optional)</div>
+                  <input className="input w-full px-3 py-2 text-sm" value={note} onChange={(e) => setNote(e.target.value)} placeholder="e.g. arrived late" />
+                </div>
+              </div>
+            )}
+          </>
+        )}
+
+        <div className="flex justify-end gap-2 pt-1">
+          <button className="btn btn-ghost px-4 py-2.5 text-sm" onClick={onClose}>Cancel</button>
+          <button className="btn btn-primary px-5 py-2.5 text-sm" disabled={!chosen || !units || units <= 0} style={{ opacity: !chosen || !units || units <= 0 ? 0.45 : 1 }}
+            onClick={() => onSubmit({ studentId, purchaseId: chosen.id, unitsUsed: Number(units), note })}>
+            Save check-in
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+/* =========================================================
+   STUDENTS VIEW
+   ========================================================= */
+
+function StudentsView(props) {
+  const { students, selectedStudentId, setSelectedStudentId } = props;
+  if (selectedStudentId) {
+    const s = students.find((x) => x.id === selectedStudentId);
+    if (s) return <StudentProfile student={s} {...props} />;
+    setSelectedStudentId(null);
+  }
+  return <StudentsList {...props} />;
+}
+
+function StudentsList({ students, setStudents, purchasesByStudent, remainingOf, setSelectedStudentId }) {
+  const [query, setQuery] = useState("");
+  const [adding, setAdding] = useState(false);
+  const filtered = students.filter((s) => s.name.toLowerCase().includes(query.toLowerCase())).sort((a, b) => a.name.localeCompare(b.name));
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap gap-3 items-center justify-between">
+        <div className="relative flex-1" style={{ minWidth: 220 }}>
+          <Search size={16} style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: "var(--ink-soft)" }} />
+          <input className="input w-full text-sm" style={{ paddingLeft: 36, paddingRight: 12, paddingTop: 10, paddingBottom: 10 }} placeholder="Search students…" value={query} onChange={(e) => setQuery(e.target.value)} />
+        </div>
+        <button className="btn btn-primary flex items-center gap-1.5 px-4 py-2.5 text-sm shrink-0" onClick={() => setAdding(true)}><Plus size={17} /> Add student</button>
+      </div>
+
+      {students.length === 0 && <Empty icon={Users} title="No students yet" sub="Add your first student to get started" />}
+
+      <div className="grid gap-2.5" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))" }}>
+        {filtered.map((s) => {
+          const ps = purchasesByStudent[s.id] || [];
+          const activeCount = ps.filter((p) => remainingOf(p) > 0).length;
+          return (
+            <button key={s.id} className="card p-4 text-left flex flex-col gap-2" style={{ background: "var(--paper)" }} onClick={() => setSelectedStudentId(s.id)}>
+              <div className="flex items-center justify-between">
+                <div className="font-semibold" style={{ color: "var(--ink)" }}>{s.name}</div>
+                <ChevronRight size={16} style={{ color: "var(--ink-soft)" }} />
+              </div>
+              {s.phone && <div className="text-xs fmono" style={{ color: "var(--ink-soft)" }}>{s.phone}</div>}
+              <div className="text-xs mt-1" style={{ color: activeCount ? "var(--teal-dark)" : "var(--ink-soft)" }}>
+                {ps.length === 0 ? "No packages yet" : `${activeCount} active · ${ps.length} total`}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
+      {adding && (
+        <Modal onClose={() => setAdding(false)} title="Add a new student">
+          <AddStudentForm onCancel={() => setAdding(false)} onSave={(s) => { const id = uid(); setStudents((prev) => [...prev, { ...s, id }]); setAdding(false); }} />
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function AddStudentForm({ onSave, onCancel }) {
+  const [name, setName] = useState("");
+  const [phone, setPhone] = useState("");
+  const [note, setNote] = useState("");
+  return (
+    <div className="flex flex-col gap-3.5">
+      <Field label="Student name *"><input className="input w-full px-3 py-2.5 text-sm" value={name} onChange={(e) => setName(e.target.value)} autoFocus /></Field>
+      <Field label="Phone / parent contact"><input className="input w-full px-3 py-2.5 text-sm" value={phone} onChange={(e) => setPhone(e.target.value)} /></Field>
+      <Field label="Note"><input className="input w-full px-3 py-2.5 text-sm" value={note} onChange={(e) => setNote(e.target.value)} /></Field>
+      <div className="flex justify-end gap-2 pt-1">
+        <button className="btn btn-ghost px-4 py-2.5 text-sm" onClick={onCancel}>Cancel</button>
+        <button className="btn btn-primary px-5 py-2.5 text-sm" disabled={!name.trim()} style={{ opacity: name.trim() ? 1 : 0.45 }} onClick={() => onSave({ name: name.trim(), phone: phone.trim(), note: note.trim() })}>Save</button>
+      </div>
+    </div>
+  );
+}
+
+function StudentProfile({ student, purchases, setPurchases, attendance, setAttendance, purchasesByStudent, usedUnitsByPurchase, remainingOf, setSelectedStudentId }) {
+  const [addingPurchase, setAddingPurchase] = useState(false);
+  const myPurchases = (purchasesByStudent[student.id] || []).slice().sort((a, b) => (b.purchaseDate || "").localeCompare(a.purchaseDate || ""));
+  const myAttendance = attendance.filter((a) => a.studentId === student.id).sort((a, b) => b.date.localeCompare(a.date));
+
+  function deletePurchase(id) {
+    setPurchases((prev) => prev.filter((p) => p.id !== id));
+    setAttendance((prev) => prev.filter((a) => a.purchaseId !== id));
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      <button className="flex items-center gap-1 text-sm font-medium w-fit" style={{ color: "var(--teal-dark)", background: "none", border: "none" }} onClick={() => setSelectedStudentId(null)}><ArrowLeft size={14} /> All students</button>
+
+      <div className="card p-5 flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <div className="fdisplay" style={{ fontSize: 24, fontWeight: 700, color: "var(--ink)" }}>{student.name}</div>
+          {student.phone && <div className="text-sm fmono mt-1" style={{ color: "var(--ink-soft)" }}>{student.phone}</div>}
+        </div>
+        <button className="btn btn-primary flex items-center gap-1.5 px-4 py-2.5 text-sm" onClick={() => setAddingPurchase(true)}><Plus size={17} /> Add package</button>
+      </div>
+
+      <div>
+        <SectionTitle>Packages purchased</SectionTitle>
+        {myPurchases.length === 0 ? <Empty icon={BookOpenCheck} title="No packages yet" sub="Add a package so this student can be checked in" /> : (
+          <div className="flex flex-col gap-2.5">
+            {myPurchases.map((p) => <PurchaseCard key={p.id} p={p} remaining={remainingOf(p)} used={usedUnitsByPurchase[p.id] || 0} onDelete={() => deletePurchase(p.id)} />)}
+          </div>
+        )}
+      </div>
+
+      <div>
+        <SectionTitle>Attendance history</SectionTitle>
+        {myAttendance.length === 0 ? <div className="text-sm py-2" style={{ color: "var(--ink-soft)" }}>No history yet</div> : (
+          <div className="card divide-y">
+            {myAttendance.map((a) => {
+              const p = purchases.find((x) => x.id === a.purchaseId);
+              return (
+                <div key={a.id} className="flex items-center justify-between px-4 py-2.5">
+                  <div className="flex items-center gap-2 text-sm">
+                    <span className="fmono" style={{ color: "var(--ink-soft)" }}>{fmtDate(a.date)}</span>
+                    <span style={{ color: "var(--ink)" }}>{p?.subject || "—"}</span>
+                  </div>
+                  <span className="text-xs fmono" style={{ color: "var(--ink-soft)" }}>{fmtNum(a.unitsUsed)} {p ? TYPE_CONFIG[p.type].unitName : ""}{a.unitsUsed !== 1 ? "s" : ""}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {addingPurchase && (
+        <Modal onClose={() => setAddingPurchase(false)} title={`Add package for ${student.name}`} wide>
+          <AddPurchaseForm onCancel={() => setAddingPurchase(false)} onSave={(purchase) => { const id = uid(); setPurchases((prev) => [...prev, { ...purchase, id, studentId: student.id }]); setAddingPurchase(false); }} />
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function PurchaseCard({ p, remaining, used, onDelete }) {
+  const cfg = TYPE_CONFIG[p.type];
+  const fee = ccFeeOf(p.pricePaid, p.paymentMethod);
+  const total = p.pricePaid + fee;
+  const pct = Math.min(100, Math.round((used / p.totalUnits) * 100));
+  return (
+    <div className="card p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-center gap-2.5">
+          <div className="flex items-center justify-center rounded-lg shrink-0" style={{ width: 36, height: 36, background: "var(--teal-tint)", color: "var(--teal-dark)" }}><TypeIcon type={p.type} size={18} /></div>
+          <div>
+            <div className="font-semibold" style={{ color: "var(--ink)" }}>{p.subject}</div>
+            <div className="text-xs" style={{ color: "var(--ink-soft)" }}>{cfg.label} · purchased {fmtDate(p.purchaseDate)}</div>
+          </div>
+        </div>
+        <button className="btn-danger p-1.5 shrink-0" onClick={onDelete} title="Delete this package"><Trash2 size={15} /></button>
+      </div>
+      <div className="mt-3">
+        <div className="h-2 rounded-full overflow-hidden" style={{ background: "var(--teal-tint)" }}>
+          <div className="h-full rounded-full" style={{ width: `${pct}%`, background: remaining === 0 ? "var(--coral)" : "var(--teal)" }} />
+        </div>
+        <div className="flex items-center justify-between mt-1.5">
+          <span className="text-xs fmono" style={{ color: "var(--ink-soft)" }}>Used {fmtNum(used)}/{fmtNum(p.totalUnits)} {cfg.unitName}{p.totalUnits !== 1 ? "s" : ""}</span>
+          <RemainingBadge remaining={remaining} total={p.totalUnits} unitName={cfg.unitName} />
+        </div>
+      </div>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-3 pt-3 text-xs fmono" style={{ borderTop: "1px solid var(--line)", color: "var(--ink-soft)" }}>
+        <span>Package {fmtBaht(p.pricePaid)}</span>
+        <span>· per {cfg.unitName} {fmtBaht(p.pricePaid / p.totalUnits)}</span>
+        <span className="flex items-center gap-1">{p.paymentMethod === "credit" ? <CreditCard size={12} /> : <Wallet size={12} />} {p.paymentMethod === "credit" ? `Credit card (+3% = ${fmtBaht(fee)})` : "Cash"}</span>
+        {p.paymentMethod === "credit" && <span>· charged total {fmtBaht(total)}</span>}
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================
+   PURCHASES VIEW
+   ========================================================= */
+
+function PurchasesView({ students, purchases, setPurchases, attendance, setAttendance, usedUnitsByPurchase, remainingOf, studentName, setSelectedStudentId, setTab }) {
+  const [filter, setFilter] = useState("active");
+  const [adding, setAdding] = useState(false);
+  const sorted = purchases.slice().sort((a, b) => (b.purchaseDate || "").localeCompare(a.purchaseDate || ""))
+    .filter((p) => (filter === "active" ? remainingOf(p) > 0 : filter === "done" ? remainingOf(p) === 0 : true));
+
+  function deletePurchase(id) {
+    setPurchases((prev) => prev.filter((p) => p.id !== id));
+    setAttendance((prev) => prev.filter((a) => a.purchaseId !== id));
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex gap-1.5">
+          {[{ id: "active", label: "Active" }, { id: "done", label: "Completed" }, { id: "all", label: "All" }].map((f) => (
+            <button key={f.id} onClick={() => setFilter(f.id)} className={`tab-btn px-3.5 py-2 text-sm ${filter === f.id ? "active" : ""}`}>{f.label}</button>
+          ))}
+        </div>
+        <button className="btn btn-primary flex items-center gap-1.5 px-4 py-2.5 text-sm" disabled={students.length === 0} style={{ opacity: students.length === 0 ? 0.5 : 1 }} onClick={() => setAdding(true)}><Plus size={17} /> Add package</button>
+      </div>
+
+      {students.length === 0 && <Empty icon={Users} title="Add a student before creating a package" sub="Go to the Students tab to add your first student" />}
+      {students.length > 0 && sorted.length === 0 && <Empty icon={BookOpenCheck} title="No packages in this filter" />}
+
+      <div className="flex flex-col gap-2.5">
+        {sorted.map((p) => {
+          const cfg = TYPE_CONFIG[p.type];
+          const rem = remainingOf(p);
+          const fee = ccFeeOf(p.pricePaid, p.paymentMethod);
+          return (
+            <div key={p.id} className="card p-4 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="flex items-center justify-center rounded-lg shrink-0" style={{ width: 38, height: 38, background: "var(--teal-tint)", color: "var(--teal-dark)" }}><TypeIcon type={p.type} size={18} /></div>
+                <div className="min-w-0">
+                  <button className="font-semibold" style={{ color: "var(--ink)", background: "none", border: "none", textAlign: "left" }} onClick={() => { setSelectedStudentId(p.studentId); setTab("students"); }}>{studentName(p.studentId)}</button>
+                  <div className="text-xs" style={{ color: "var(--ink-soft)" }}>{p.subject} · {cfg.label}</div>
+                </div>
+              </div>
+              <div className="flex items-center gap-3 flex-wrap">
+                <span className="text-xs fmono" style={{ color: "var(--ink-soft)" }}>{fmtBaht(p.pricePaid)}{p.paymentMethod === "credit" ? ` +${fmtBaht(fee)}` : ""}</span>
+                <RemainingBadge remaining={rem} total={p.totalUnits} unitName={cfg.unitName} />
+                <button className="btn-danger p-1.5" onClick={() => deletePurchase(p.id)}><Trash2 size={15} /></button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {adding && (
+        <Modal onClose={() => setAdding(false)} title="Add a new package" wide>
+          <AddPurchaseForm students={students} requireStudentPicker onCancel={() => setAdding(false)} onSave={(purchase) => { const id = uid(); setPurchases((prev) => [...prev, { ...purchase, id }]); setAdding(false); }} />
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function AddPurchaseForm({ students, requireStudentPicker, onSave, onCancel }) {
+  const [studentId, setStudentId] = useState(students && students.length === 1 ? students[0].id : "");
+  const [subject, setSubject] = useState("");
+  const [type, setType] = useState("course");
+  const [totalUnits, setTotalUnits] = useState(TYPE_CONFIG.course.defaultUnits);
+  const [price, setPrice] = useState("");
+  const [method, setMethod] = useState("cash");
+  const [purchaseDate, setPurchaseDate] = useState(todayStr());
+
+  useEffect(() => { setTotalUnits(TYPE_CONFIG[type].defaultUnits); }, [type]);
+
+  const priceNum = Number(price) || 0;
+  const fee = ccFeeOf(priceNum, method);
+  const total = priceNum + fee;
+  const perUnit = totalUnits > 0 ? priceNum / totalUnits : 0;
+  const canSave = subject.trim() && totalUnits > 0 && priceNum > 0 && (!requireStudentPicker || studentId);
+
+  return (
+    <div className="flex flex-col gap-3.5">
+      {requireStudentPicker && (
+        <Field label="Student *">
+          <select className="input w-full px-3 py-2.5 text-sm" value={studentId} onChange={(e) => setStudentId(e.target.value)}>
+            <option value="">Select a student…</option>
+            {students.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </Field>
+      )}
+      <Field label="Subject / course name *"><input className="input w-full px-3 py-2.5 text-sm" placeholder="e.g. Math, Coding, Art" value={subject} onChange={(e) => setSubject(e.target.value)} autoFocus /></Field>
+      <Field label="Type *">
+        <div className="grid grid-cols-2 gap-2">
+          {Object.entries(TYPE_CONFIG).map(([key, cfg]) => (
+            <button key={key} onClick={() => setType(key)} className="flex items-center gap-2 px-3 py-2.5 rounded-lg text-left text-sm" style={{ border: type === key ? "2px solid var(--teal)" : "1px solid var(--line)", background: type === key ? "var(--teal-tint)" : "transparent" }}>
+              <TypeIcon type={key} size={16} />
+              <div><div className="font-medium" style={{ color: "var(--ink)" }}>{cfg.label}</div><div className="text-xs" style={{ color: "var(--ink-soft)" }}>{cfg.hint}</div></div>
+            </button>
+          ))}
+        </div>
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label={`Quantity (${TYPE_CONFIG[type].unitName}s) *`}><input type="number" min="1" step="0.5" className="input w-full px-3 py-2.5 text-sm fmono" value={totalUnits} onChange={(e) => setTotalUnits(Number(e.target.value))} /></Field>
+        <Field label="Purchase date"><input type="date" className="input w-full px-3 py-2.5 text-sm fmono" value={purchaseDate} onChange={(e) => setPurchaseDate(e.target.value)} /></Field>
+      </div>
+      <Field label="Package price (THB) *"><input type="number" min="0" className="input w-full px-3 py-2.5 text-sm fmono" placeholder="0" value={price} onChange={(e) => setPrice(e.target.value)} /></Field>
+      <Field label="Payment method">
+        <div className="grid grid-cols-2 gap-2">
+          <button onClick={() => setMethod("cash")} className="flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-medium" style={{ border: method === "cash" ? "2px solid var(--teal)" : "1px solid var(--line)", background: method === "cash" ? "var(--teal-tint)" : "transparent", color: "var(--ink)" }}><Wallet size={16} /> Cash / transfer</button>
+          <button onClick={() => setMethod("credit")} className="flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-medium" style={{ border: method === "credit" ? "2px solid var(--teal)" : "1px solid var(--line)", background: method === "credit" ? "var(--teal-tint)" : "transparent", color: "var(--ink)" }}><CreditCard size={16} /> Credit card (+3%)</button>
+        </div>
+      </Field>
+      {priceNum > 0 && totalUnits > 0 && (
+        <div className="card p-3.5 fmono text-xs flex flex-col gap-1" style={{ background: "var(--teal-tint)", border: "none" }}>
+          <div className="flex justify-between"><span>Price per {TYPE_CONFIG[type].unitName}</span><span className="font-semibold">{fmtBaht(perUnit)}</span></div>
+          {method === "credit" && (<>
+            <div className="flex justify-between"><span>Credit card fee (3%)</span><span className="font-semibold">{fmtBaht(fee)}</span></div>
+            <div className="flex justify-between" style={{ borderTop: "1px solid rgba(0,0,0,0.08)", paddingTop: 4, marginTop: 2 }}><span>Total charged to customer</span><span className="font-semibold">{fmtBaht(total)}</span></div>
+          </>)}
+        </div>
+      )}
+      <div className="flex justify-end gap-2 pt-1">
+        <button className="btn btn-ghost px-4 py-2.5 text-sm" onClick={onCancel}>Cancel</button>
+        <button className="btn btn-primary px-5 py-2.5 text-sm" disabled={!canSave} style={{ opacity: canSave ? 1 : 0.45 }}
+          onClick={() => onSave({ studentId: requireStudentPicker ? studentId : undefined, subject: subject.trim(), type, totalUnits: Number(totalUnits), pricePaid: priceNum, paymentMethod: method, purchaseDate })}>
+          Save package
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================
+   REPORTS VIEW
+   ========================================================= */
+
+function ReportsView({ students, purchases, attendance, remainingOf, studentName }) {
+  const totalRevenue = purchases.reduce((sum, p) => sum + p.pricePaid + ccFeeOf(p.pricePaid, p.paymentMethod), 0);
+  const totalFees = purchases.reduce((sum, p) => sum + ccFeeOf(p.pricePaid, p.paymentMethod), 0);
+  const thisMonth = todayStr().slice(0, 7);
+  const attendanceThisMonth = attendance.filter((a) => a.date.slice(0, 7) === thisMonth).length;
+
+  const lowBalance = purchases.map((p) => ({ p, rem: remainingOf(p) })).filter(({ p, rem }) => rem > 0 && rem <= Math.max(1, Math.round(p.totalUnits * 0.2))).sort((a, b) => a.rem - b.rem);
+
+  const bySubject = {};
+  purchases.forEach((p) => { bySubject[p.subject] = (bySubject[p.subject] || 0) + p.pricePaid + ccFeeOf(p.pricePaid, p.paymentMethod); });
+  const subjectRows = Object.entries(bySubject).sort((a, b) => b[1] - a[1]);
+  const maxSubject = subjectRows.length ? subjectRows[0][1] : 1;
+
+  return (
+    <div className="flex flex-col gap-5">
+      <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(180px,1fr))" }}>
+        <StatCard label="Total students" value={students.length.toString()} icon={Users} />
+        <StatCard label="Total packages" value={purchases.length.toString()} icon={BookOpenCheck} />
+        <StatCard label="Total revenue" value={fmtBaht(totalRevenue)} icon={Wallet} />
+        <StatCard label="Total card fees" value={fmtBaht(totalFees)} icon={CreditCard} />
+      </div>
+      <div className="card p-4">
+        <div className="text-sm font-semibold mb-0.5" style={{ color: "var(--ink)" }}>Check-ins this month</div>
+        <div className="fdisplay" style={{ fontSize: 30, fontWeight: 700, color: "var(--teal-dark)" }}>{attendanceThisMonth} <span className="text-base fmono" style={{ color: "var(--ink-soft)", fontWeight: 400 }}>sessions</span></div>
+      </div>
+      <div>
+        <SectionTitle>Revenue by subject</SectionTitle>
+        {subjectRows.length === 0 ? <div className="text-sm" style={{ color: "var(--ink-soft)" }}>No data yet</div> : (
+          <div className="card p-4 flex flex-col gap-3">
+            {subjectRows.map(([subj, amt]) => (
+              <div key={subj}>
+                <div className="flex justify-between text-sm mb-1"><span style={{ color: "var(--ink)" }} className="font-medium">{subj}</span><span className="fmono" style={{ color: "var(--ink-soft)" }}>{fmtBaht(amt)}</span></div>
+                <div className="h-2 rounded-full overflow-hidden" style={{ background: "var(--teal-tint)" }}><div className="h-full rounded-full" style={{ width: `${(amt / maxSubject) * 100}%`, background: "var(--teal)" }} /></div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      <div>
+        <SectionTitle>Running low (follow up)</SectionTitle>
+        {lowBalance.length === 0 ? <div className="text-sm" style={{ color: "var(--ink-soft)" }}>No packages running low right now</div> : (
+          <div className="card divide-y">
+            {lowBalance.map(({ p, rem }) => (
+              <div key={p.id} className="flex items-center justify-between px-4 py-2.5">
+                <div className="text-sm"><span className="font-medium" style={{ color: "var(--ink)" }}>{studentName(p.studentId)}</span><span style={{ color: "var(--ink-soft)" }}> · {p.subject}</span></div>
+                <RemainingBadge remaining={rem} total={p.totalUnits} unitName={TYPE_CONFIG[p.type].unitName} />
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function StatCard({ label, value, icon: Icon }) {
+  return (
+    <div className="card p-4">
+      <div className="flex items-center gap-2 mb-2" style={{ color: "var(--teal-dark)" }}><Icon size={16} /><span className="text-xs font-semibold" style={{ color: "var(--ink-soft)" }}>{label}</span></div>
+      <div className="fdisplay" style={{ fontSize: 22, fontWeight: 700, color: "var(--ink)" }}>{value}</div>
+    </div>
+  );
+}
+
+/* =========================================================
+   BACKUP VIEW — download Excel (always works) + auto-sync to a
+   Google Sheet via Apps Script (works because this page is hosted
+   as a real website, not inside Claude's sandboxed preview)
+   ========================================================= */
+
+function buildWorkbook({ students, purchases, attendance, usedUnitsByPurchase, remainingOf, studentName }) {
+  const wb = XLSX.utils.book_new();
+  const studentRows = students.map((s) => ({ ID: s.id, Name: s.name, Phone: s.phone || "", Note: s.note || "" }));
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(studentRows), "Students");
+
+  const purchaseRows = purchases.map((p) => {
+    const cfg = TYPE_CONFIG[p.type];
+    const fee = ccFeeOf(p.pricePaid, p.paymentMethod);
+    const used = usedUnitsByPurchase[p.id] || 0;
+    return {
+      ID: p.id, Student: studentName(p.studentId), Subject: p.subject, Type: cfg.label,
+      "Total Units": p.totalUnits, Unit: cfg.unitName, "Price Paid (THB)": p.pricePaid,
+      "Payment Method": p.paymentMethod === "credit" ? "Credit card" : "Cash",
+      "CC Fee 3% (THB)": Math.round(fee), "Total Collected (THB)": Math.round(p.pricePaid + fee),
+      "Price / Unit (THB)": Math.round((p.pricePaid / p.totalUnits) * 100) / 100,
+      "Purchase Date": p.purchaseDate, Used: used, Remaining: remainingOf(p),
+    };
+  });
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(purchaseRows), "Purchases");
+
+  const attendanceRows = attendance.slice().sort((a, b) => a.date.localeCompare(b.date)).map((a) => {
+    const p = purchases.find((x) => x.id === a.purchaseId);
+    return { Date: a.date, Student: studentName(a.studentId), Subject: p?.subject || "", "Units Used": a.unitsUsed, Unit: p ? TYPE_CONFIG[p.type].unitName : "", Note: a.note || "" };
+  });
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(attendanceRows), "Attendance");
+  return wb;
+}
+
+function BackupView({ students, purchases, attendance, usedUnitsByPurchase, remainingOf, studentName, sheetUrl, setSheetUrl, autoSync, setAutoSync, lastSynced, doSync }) {
+  const [justDownloaded, setJustDownloaded] = useState(false);
+  const [draftUrl, setDraftUrl] = useState(sheetUrl);
+  const [syncing, setSyncing] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [justSaved, setJustSaved] = useState(false);
+
+  useEffect(() => setDraftUrl(sheetUrl), [sheetUrl]);
+
+  function handleDownload() {
+    const wb = buildWorkbook({ students, purchases, attendance, usedUnitsByPurchase, remainingOf, studentName });
+    XLSX.writeFile(wb, `school-data-${todayStr()}.xlsx`);
+    setJustDownloaded(true);
+    setTimeout(() => setJustDownloaded(false), 2500);
+  }
+  async function handleCopy() {
+    try { await navigator.clipboard.writeText(APPS_SCRIPT_CODE); setCopied(true); setTimeout(() => setCopied(false), 1800); } catch (e) {}
+  }
+  async function handleSyncNow() { setSyncing(true); await doSync(); setSyncing(false); }
+  function handleSaveUrl() { setSheetUrl(draftUrl.trim()); setJustSaved(true); setTimeout(() => setJustSaved(false), 1500); }
+
+  const steps = [
+    { title: "Create a Google Sheet", body: "Open sheets.google.com and start a new blank spreadsheet." },
+    { title: "Open the script editor", body: "In the sheet, go to Extensions → Apps Script." },
+    { title: "Paste the code", body: "Delete the default code and paste the code below, then save (⌘S / Ctrl+S)." },
+    { title: "Deploy as a web app", body: "Deploy → New deployment → type Web app. Execute as: Me. Who has access: Anyone. Deploy, then authorize when asked." },
+    { title: "Copy the web app URL", body: "Copy the URL ending in /exec and paste it below." },
+  ];
+
+  return (
+    <div className="flex flex-col gap-5">
+      <div className="card p-5 flex flex-col items-center text-center gap-3" style={{ background: "var(--teal-tint)", border: "none" }}>
+        <div className="flex items-center justify-center rounded-full" style={{ width: 52, height: 52, background: "var(--paper)", color: "var(--teal-dark)" }}><FileSpreadsheet size={26} /></div>
+        <div>
+          <div className="fdisplay" style={{ fontSize: 19, fontWeight: 700, color: "var(--ink)" }}>Download as Excel</div>
+          <div className="text-sm mt-1" style={{ color: "var(--ink-soft)", maxWidth: 420 }}>A single file with Students, Purchases and Attendance sheets, fully calculated.</div>
+        </div>
+        <button className="btn btn-primary flex items-center gap-2 px-5 py-3 text-sm" onClick={handleDownload}>
+          {justDownloaded ? <CheckCircle size={17} /> : <Download size={17} />} {justDownloaded ? "Downloaded!" : "Download .xlsx"}
+        </button>
+        <div className="text-xs fmono" style={{ color: "var(--ink-soft)" }}>{students.length} students · {purchases.length} packages · {attendance.length} check-ins</div>
+      </div>
+
+      <div>
+        <SectionTitle>Auto-sync to a Google Sheet</SectionTitle>
+        <div className="card p-4 flex flex-col gap-3">
+          <Field label="Google Apps Script web app URL">
+            <input className="input w-full px-3 py-2.5 text-sm fmono" placeholder="https://script.google.com/macros/s/…/exec" value={draftUrl} onChange={(e) => setDraftUrl(e.target.value)} />
+          </Field>
+          <div className="flex flex-wrap items-center gap-2">
+            <button className="btn btn-primary px-4 py-2.5 text-sm" onClick={handleSaveUrl} disabled={!draftUrl.trim()} style={{ opacity: draftUrl.trim() ? 1 : 0.45 }}>{justSaved ? "Saved!" : "Save URL"}</button>
+            <button className="btn btn-ghost flex items-center gap-1.5 px-4 py-2.5 text-sm" onClick={handleSyncNow} disabled={!sheetUrl || syncing} style={{ opacity: !sheetUrl ? 0.45 : 1 }}>
+              <RefreshCw size={15} className={syncing ? "animate-spin" : ""} /> {syncing ? "Syncing…" : "Sync now"}
+            </button>
+            <label className="flex items-center gap-2 text-sm ml-1" style={{ color: "var(--ink-soft)" }}>
+              <input type="checkbox" checked={autoSync} onChange={(e) => setAutoSync(e.target.checked)} /> Auto-sync after every change
+            </label>
+          </div>
+          <div className="text-xs fmono" style={{ color: "var(--ink-soft)" }}>{sheetUrl ? `Connected · last synced ${fmtDateTime(lastSynced)}` : "Not connected yet"}</div>
+        </div>
+      </div>
+
+      <div>
+        <SectionTitle>One-time setup in Google Sheets</SectionTitle>
+        <div className="card p-4 flex flex-col gap-3">
+          {steps.map((s, i) => (
+            <div key={i} className="flex gap-3">
+              <div className="flex items-center justify-center rounded-full shrink-0 fmono text-xs font-semibold" style={{ width: 22, height: 22, background: "var(--teal-tint)", color: "var(--teal-dark)", marginTop: 1 }}>{i + 1}</div>
+              <div><div className="text-sm font-semibold" style={{ color: "var(--ink)" }}>{s.title}</div><div className="text-sm" style={{ color: "var(--ink-soft)" }}>{s.body}</div></div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div>
+        <SectionTitle>Apps Script code to paste</SectionTitle>
+        <div className="card p-0 overflow-hidden">
+          <div className="flex items-center justify-between px-4 py-2.5" style={{ borderBottom: "1px solid var(--line)", background: "var(--teal-tint)" }}>
+            <span className="text-xs font-semibold fmono" style={{ color: "var(--teal-dark)" }}>Code.gs</span>
+            <button className="flex items-center gap-1.5 text-xs font-semibold" style={{ color: "var(--teal-dark)", background: "none", border: "none" }} onClick={handleCopy}>{copied ? <Check size={14} /> : <Copy size={14} />} {copied ? "Copied" : "Copy code"}</button>
+          </div>
+          <pre className="fmono text-xs p-4 overflow-x-auto" style={{ color: "var(--ink)", margin: 0, background: "var(--paper)" }}>{APPS_SCRIPT_CODE}</pre>
+        </div>
+        <a href="https://sheets.google.com" target="_blank" rel="noreferrer" className="flex items-center gap-1.5 text-sm font-medium mt-3 w-fit" style={{ color: "var(--teal-dark)" }}>Open Google Sheets <ExternalLink size={14} /></a>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- generic UI atoms ---------- */
+
+function SectionTitle({ children }) { return <div className="text-sm font-semibold mb-2" style={{ color: "var(--ink-soft)" }}>{children}</div>; }
+
+function Field({ label, children }) {
+  return <label className="flex flex-col gap-1.5"><span className="text-xs font-semibold" style={{ color: "var(--ink-soft)" }}>{label}</span>{children}</label>;
+}
+
+function Modal({ title, children, onClose, wide }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(30,42,46,0.45)" }} onClick={onClose}>
+      <div className="card w-full p-5" style={{ maxWidth: wide ? 480 : 400, maxHeight: "88vh", overflowY: "auto" }} onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-4">
+          <div className="fdisplay" style={{ fontSize: 18, fontWeight: 700, color: "var(--ink)" }}>{title}</div>
+          <button onClick={onClose} className="p-1 rounded-full" style={{ color: "var(--ink-soft)", background: "none", border: "none" }}><X size={18} /></button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App />);
+</script>
+</body>
+</html>
