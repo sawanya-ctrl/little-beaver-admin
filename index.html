@@ -15,6 +15,8 @@
 {
   "imports": {
     "react": "https://esm.sh/react@18.3.1",
+    "react/jsx-runtime": "https://esm.sh/react@18.3.1/jsx-runtime",
+    "react/jsx-dev-runtime": "https://esm.sh/react@18.3.1/jsx-dev-runtime",
     "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
     "lucide-react": "https://esm.sh/lucide-react@0.383.0?external=react",
     "xlsx": "https://esm.sh/xlsx@0.18.5"
@@ -26,7 +28,18 @@
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 </head>
 <body>
-<div id="root"></div>
+<div id="root">
+  <div style="font-family: sans-serif; max-width: 480px; margin: 60px auto; padding: 20px; color: #5B6B67;">
+    Loading… if this stays here more than a few seconds, open the browser console (F12) to see the error.
+  </div>
+</div>
+<script>
+  window.addEventListener('error', function (e) {
+    document.getElementById('root').innerHTML =
+      '<div style="font-family: monospace; max-width:640px; margin:60px auto; padding:20px; background:#F7E7E4; color:#C15A4F; border-radius:12px; white-space:pre-wrap;">Failed to load app:\n' +
+      (e.message || e) + '</div>';
+  });
+</script>
 
 <script type="text/babel" data-type="module" data-presets="react">
 import React, { useState, useEffect, useRef, useMemo } from "react";
