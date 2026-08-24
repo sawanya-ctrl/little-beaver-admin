@@ -86,9 +86,9 @@ const APPS_SCRIPT_CODE = `function doPost(e) {
   );
 
   writeSheet(ss, 'Attendance',
-    ['Date', 'Student', 'Subject', 'Units Used', 'Unit', 'Note'],
+    ['Date', 'Student', 'Subject', 'Units Used', 'Unit', 'Teacher', 'Note'],
     payload.attendance.map(function (a) {
-      return [a.date, a.studentName, a.subject, a.unitsUsed, a.unitName, a.note];
+      return [a.date, a.studentName, a.subject, a.unitsUsed, a.unitName, a.teacher, a.note];
     })
   );
 
@@ -148,6 +148,8 @@ function App() {
   const [students, setStudents] = useState([]);
   const [purchases, setPurchases] = useState([]);
   const [attendance, setAttendance] = useState([]);
+  const [subjects, setSubjects] = useState([]);
+  const [teachers, setTeachers] = useState([]);
   const [sheetUrl, setSheetUrl] = useState("");
   const [autoSync, setAutoSync] = useState(false);
   const [lastSynced, setLastSynced] = useState(null);
@@ -163,6 +165,13 @@ function App() {
         setStudents(data.students || []);
         setPurchases(data.purchases || []);
         setAttendance(data.attendance || []);
+        // merge saved lists with any values already used in past data (migration-safe)
+        const subjSet = new Set(data.subjects || []);
+        (data.purchases || []).forEach((p) => p.subject && subjSet.add(p.subject));
+        setSubjects(Array.from(subjSet));
+        const teachSet = new Set(data.teachers || []);
+        (data.attendance || []).forEach((a) => a.teacher && teachSet.add(a.teacher));
+        setTeachers(Array.from(teachSet));
         setSheetUrl(data.sheetUrl || "");
         setAutoSync(!!data.autoSync);
         setLastSynced(data.lastSynced || null);
@@ -175,12 +184,12 @@ function App() {
   useEffect(() => {
     if (!loadedRef.current) return;
     const t = setTimeout(() => {
-      storageSet(STORAGE_KEY, JSON.stringify({ students, purchases, attendance, sheetUrl, autoSync, lastSynced }));
+      storageSet(STORAGE_KEY, JSON.stringify({ students, purchases, attendance, subjects, teachers, sheetUrl, autoSync, lastSynced }));
       if (autoSync && sheetUrl) doSync();
     }, 350);
     return () => clearTimeout(t);
     // eslint-disable-next-line
-  }, [students, purchases, attendance]);
+  }, [students, purchases, attendance, subjects, teachers]);
 
   const purchasesByStudent = useMemo(() => {
     const m = {};
@@ -222,7 +231,8 @@ function App() {
         const p = purchases.find((x) => x.id === a.purchaseId);
         return {
           date: a.date, studentName: studentName(a.studentId), subject: p?.subject || "",
-          unitsUsed: a.unitsUsed, unitName: p ? TYPE_CONFIG[p.type].unitName : "", note: a.note || "",
+          unitsUsed: a.unitsUsed, unitName: p ? TYPE_CONFIG[p.type].unitName : "",
+          teacher: a.teacher || "", note: a.note || "",
         };
       }),
     };
@@ -235,7 +245,7 @@ function App() {
       });
       const now = Date.now();
       setLastSynced(now);
-      storageSet(STORAGE_KEY, JSON.stringify({ students, purchases, attendance, sheetUrl, autoSync, lastSynced: now }));
+      storageSet(STORAGE_KEY, JSON.stringify({ students, purchases, attendance, subjects, teachers, sheetUrl, autoSync, lastSynced: now }));
       return true;
     } catch (e) {
       return false;
@@ -244,6 +254,7 @@ function App() {
 
   const ctx = {
     students, setStudents, purchases, setPurchases, attendance, setAttendance,
+    subjects, setSubjects, teachers, setTeachers,
     purchasesByStudent, usedUnitsByPurchase, remainingOf, studentName,
     selectedStudentId, setSelectedStudentId, setTab,
     sheetUrl, setSheetUrl, autoSync, setAutoSync, lastSynced, doSync,
@@ -411,7 +422,7 @@ function TypeIcon({ type, size = 15 }) {
    CHECK-IN VIEW
    ========================================================= */
 
-function CheckInView({ students, purchases, attendance, setAttendance, purchasesByStudent, remainingOf, studentName, setTab }) {
+function CheckInView({ students, purchases, attendance, setAttendance, purchasesByStudent, remainingOf, studentName, setTab, teachers, setTeachers }) {
   const [date, setDate] = useState(todayStr());
   const [adding, setAdding] = useState(false);
   const [justStamped, setJustStamped] = useState(null);
@@ -453,6 +464,7 @@ function CheckInView({ students, purchases, attendance, setAttendance, purchases
                   <div className="text-xs flex items-center gap-1.5 mt-0.5" style={{ color: "var(--ink-soft)" }}>
                     <TypeIcon type={p?.type} size={13} />
                     {p ? `${p.subject} · used ${fmtNum(a.unitsUsed)} ${TYPE_CONFIG[p.type].unitName}${a.unitsUsed !== 1 ? "s" : ""}` : "Package not found"}
+                    {a.teacher ? ` · Teacher: ${a.teacher}` : ""}
                   </div>
                 </div>
               </div>
@@ -465,6 +477,7 @@ function CheckInView({ students, purchases, attendance, setAttendance, purchases
       {adding && (
         <CheckInModal
           date={date} students={students} purchasesByStudent={purchasesByStudent} remainingOf={remainingOf}
+          teachers={teachers} setTeachers={setTeachers}
           onClose={() => setAdding(false)}
           onGotoPurchases={() => { setAdding(false); setTab("purchases"); }}
           onSubmit={(entry) => {
@@ -480,12 +493,16 @@ function CheckInView({ students, purchases, attendance, setAttendance, purchases
   );
 }
 
-function CheckInModal({ date, students, purchasesByStudent, remainingOf, onClose, onSubmit, onGotoPurchases }) {
+function CheckInModal({ date, students, purchasesByStudent, remainingOf, teachers, setTeachers, onClose, onSubmit, onGotoPurchases }) {
   const [query, setQuery] = useState("");
   const [studentId, setStudentId] = useState(null);
   const [purchaseId, setPurchaseId] = useState(null);
   const [units, setUnits] = useState(1);
+  const [teacher, setTeacher] = useState("");
   const [note, setNote] = useState("");
+  function addTeacherOption(v) {
+    setTeachers((prev) => (prev.includes(v) ? prev : [...prev, v]));
+  }
 
   const filtered = students.filter((s) => s.name.toLowerCase().includes(query.toLowerCase()));
   const activePurchases = studentId ? (purchasesByStudent[studentId] || []).filter((p) => remainingOf(p) > 0) : [];
@@ -563,6 +580,10 @@ function CheckInModal({ date, students, purchasesByStudent, remainingOf, onClose
                   <div className="text-xs font-semibold mb-1.5" style={{ color: "var(--ink-soft)" }}>Note (optional)</div>
                   <input className="input w-full px-3 py-2 text-sm" value={note} onChange={(e) => setNote(e.target.value)} placeholder="e.g. arrived late" />
                 </div>
+                <div style={{ gridColumn: "1 / -1" }}>
+                  <div className="text-xs font-semibold mb-1.5" style={{ color: "var(--ink-soft)" }}>Teacher (optional)</div>
+                  <ComboSelect value={teacher} onChange={setTeacher} options={teachers} onAddOption={addTeacherOption} placeholder="Teacher name" />
+                </div>
               </div>
             )}
           </>
@@ -571,7 +592,7 @@ function CheckInModal({ date, students, purchasesByStudent, remainingOf, onClose
         <div className="flex justify-end gap-2 pt-1">
           <button className="btn btn-ghost px-4 py-2.5 text-sm" onClick={onClose}>Cancel</button>
           <button className="btn btn-primary px-5 py-2.5 text-sm" disabled={!chosen || !units || units <= 0} style={{ opacity: !chosen || !units || units <= 0 ? 0.45 : 1 }}
-            onClick={() => onSubmit({ studentId, purchaseId: chosen.id, unitsUsed: Number(units), note })}>
+            onClick={() => onSubmit({ studentId, purchaseId: chosen.id, unitsUsed: Number(units), teacher, note })}>
             Save check-in
           </button>
         </div>
@@ -656,7 +677,7 @@ function AddStudentForm({ onSave, onCancel }) {
   );
 }
 
-function StudentProfile({ student, purchases, setPurchases, attendance, setAttendance, purchasesByStudent, usedUnitsByPurchase, remainingOf, setSelectedStudentId }) {
+function StudentProfile({ student, purchases, setPurchases, attendance, setAttendance, purchasesByStudent, usedUnitsByPurchase, remainingOf, setSelectedStudentId, subjects, setSubjects, teachers }) {
   const [addingPurchase, setAddingPurchase] = useState(false);
   const myPurchases = (purchasesByStudent[student.id] || []).slice().sort((a, b) => (b.purchaseDate || "").localeCompare(a.purchaseDate || ""));
   const myAttendance = attendance.filter((a) => a.studentId === student.id).sort((a, b) => b.date.localeCompare(a.date));
@@ -698,6 +719,7 @@ function StudentProfile({ student, purchases, setPurchases, attendance, setAtten
                   <div className="flex items-center gap-2 text-sm">
                     <span className="fmono" style={{ color: "var(--ink-soft)" }}>{fmtDate(a.date)}</span>
                     <span style={{ color: "var(--ink)" }}>{p?.subject || "—"}</span>
+                    {a.teacher && <span className="text-xs" style={{ color: "var(--ink-soft)" }}>· {a.teacher}</span>}
                   </div>
                   <span className="text-xs fmono" style={{ color: "var(--ink-soft)" }}>{fmtNum(a.unitsUsed)} {p ? TYPE_CONFIG[p.type].unitName : ""}{a.unitsUsed !== 1 ? "s" : ""}</span>
                 </div>
@@ -709,7 +731,7 @@ function StudentProfile({ student, purchases, setPurchases, attendance, setAtten
 
       {addingPurchase && (
         <Modal onClose={() => setAddingPurchase(false)} title={`Add package for ${student.name}`} wide>
-          <AddPurchaseForm onCancel={() => setAddingPurchase(false)} onSave={(purchase) => { const id = uid(); setPurchases((prev) => [...prev, { ...purchase, id, studentId: student.id }]); setAddingPurchase(false); }} />
+          <AddPurchaseForm subjects={subjects} setSubjects={setSubjects} onCancel={() => setAddingPurchase(false)} onSave={(purchase) => { const id = uid(); setPurchases((prev) => [...prev, { ...purchase, id, studentId: student.id }]); setAddingPurchase(false); }} />
         </Modal>
       )}
     </div>
@@ -756,7 +778,7 @@ function PurchaseCard({ p, remaining, used, onDelete }) {
    PURCHASES VIEW
    ========================================================= */
 
-function PurchasesView({ students, purchases, setPurchases, attendance, setAttendance, usedUnitsByPurchase, remainingOf, studentName, setSelectedStudentId, setTab }) {
+function PurchasesView({ students, purchases, setPurchases, attendance, setAttendance, usedUnitsByPurchase, remainingOf, studentName, setSelectedStudentId, setTab, subjects, setSubjects }) {
   const [filter, setFilter] = useState("active");
   const [adding, setAdding] = useState(false);
   const sorted = purchases.slice().sort((a, b) => (b.purchaseDate || "").localeCompare(a.purchaseDate || ""))
@@ -807,14 +829,14 @@ function PurchasesView({ students, purchases, setPurchases, attendance, setAtten
 
       {adding && (
         <Modal onClose={() => setAdding(false)} title="Add a new package" wide>
-          <AddPurchaseForm students={students} requireStudentPicker onCancel={() => setAdding(false)} onSave={(purchase) => { const id = uid(); setPurchases((prev) => [...prev, { ...purchase, id }]); setAdding(false); }} />
+          <AddPurchaseForm students={students} requireStudentPicker subjects={subjects} setSubjects={setSubjects} onCancel={() => setAdding(false)} onSave={(purchase) => { const id = uid(); setPurchases((prev) => [...prev, { ...purchase, id }]); setAdding(false); }} />
         </Modal>
       )}
     </div>
   );
 }
 
-function AddPurchaseForm({ students, requireStudentPicker, onSave, onCancel }) {
+function AddPurchaseForm({ students, requireStudentPicker, subjects, setSubjects, onSave, onCancel }) {
   const [studentId, setStudentId] = useState(students && students.length === 1 ? students[0].id : "");
   const [subject, setSubject] = useState("");
   const [type, setType] = useState("course");
@@ -829,7 +851,10 @@ function AddPurchaseForm({ students, requireStudentPicker, onSave, onCancel }) {
   const fee = ccFeeOf(priceNum, method);
   const total = priceNum + fee;
   const perUnit = totalUnits > 0 ? priceNum / totalUnits : 0;
-  const canSave = subject.trim() && totalUnits > 0 && priceNum > 0 && (!requireStudentPicker || studentId);
+  const canSave = subject && subject.trim() && totalUnits > 0 && priceNum > 0 && (!requireStudentPicker || studentId);
+  function addSubjectOption(v) {
+    setSubjects((prev) => (prev.includes(v) ? prev : [...prev, v]));
+  }
 
   return (
     <div className="flex flex-col gap-3.5">
@@ -841,7 +866,9 @@ function AddPurchaseForm({ students, requireStudentPicker, onSave, onCancel }) {
           </select>
         </Field>
       )}
-      <Field label="Subject / course name *"><input className="input w-full px-3 py-2.5 text-sm" placeholder="e.g. Math, Coding, Art" value={subject} onChange={(e) => setSubject(e.target.value)} autoFocus /></Field>
+      <Field label="Subject / course name *">
+        <ComboSelect value={subject} onChange={setSubject} options={subjects} onAddOption={addSubjectOption} placeholder="e.g. Math, Coding, Art" />
+      </Field>
       <Field label="Type *">
         <div className="grid grid-cols-2 gap-2">
           {Object.entries(TYPE_CONFIG).map(([key, cfg]) => (
@@ -900,6 +927,20 @@ function ReportsView({ students, purchases, attendance, remainingOf, studentName
   const subjectRows = Object.entries(bySubject).sort((a, b) => b[1] - a[1]);
   const maxSubject = subjectRows.length ? subjectRows[0][1] : 1;
 
+  // Value taught per teacher = sum of (units they taught × package price per unit),
+  // based on the price of the package used in each session — separate from revenue collected.
+  const byTeacher = {};
+  attendance.forEach((a) => {
+    if (!a.teacher) return;
+    const p = purchases.find((x) => x.id === a.purchaseId);
+    if (!p) return;
+    const perUnit = p.pricePaid / p.totalUnits;
+    byTeacher[a.teacher] = (byTeacher[a.teacher] || 0) + perUnit * a.unitsUsed;
+  });
+  const teacherRows = Object.entries(byTeacher).sort((a, b) => b[1] - a[1]);
+  const maxTeacher = teacherRows.length ? teacherRows[0][1] : 1;
+  const unassignedSessions = attendance.filter((a) => !a.teacher).length;
+
   return (
     <div className="flex flex-col gap-5">
       <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(180px,1fr))" }}>
@@ -922,6 +963,26 @@ function ReportsView({ students, purchases, attendance, remainingOf, studentName
                 <div className="h-2 rounded-full overflow-hidden" style={{ background: "var(--teal-tint)" }}><div className="h-full rounded-full" style={{ width: `${(amt / maxSubject) * 100}%`, background: "var(--teal)" }} /></div>
               </div>
             ))}
+          </div>
+        )}
+      </div>
+      <div>
+        <SectionTitle>Value taught by teacher</SectionTitle>
+        {teacherRows.length === 0 ? (
+          <div className="text-sm" style={{ color: "var(--ink-soft)" }}>No check-ins with a teacher assigned yet</div>
+        ) : (
+          <div className="card p-4 flex flex-col gap-3">
+            {teacherRows.map(([t, amt]) => (
+              <div key={t}>
+                <div className="flex justify-between text-sm mb-1"><span style={{ color: "var(--ink)" }} className="font-medium">{t}</span><span className="fmono" style={{ color: "var(--ink-soft)" }}>{fmtBaht(amt)}</span></div>
+                <div className="h-2 rounded-full overflow-hidden" style={{ background: "var(--teal-tint)" }}><div className="h-full rounded-full" style={{ width: `${(amt / maxTeacher) * 100}%`, background: "var(--amber)" }} /></div>
+              </div>
+            ))}
+            {unassignedSessions > 0 && (
+              <div className="text-xs fmono" style={{ color: "var(--ink-soft)", borderTop: "1px solid var(--line)", paddingTop: 10 }}>
+                {unassignedSessions} check-in{unassignedSessions !== 1 ? "s" : ""} without a teacher assigned
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -979,9 +1040,22 @@ function buildWorkbook({ students, purchases, attendance, usedUnitsByPurchase, r
 
   const attendanceRows = attendance.slice().sort((a, b) => a.date.localeCompare(b.date)).map((a) => {
     const p = purchases.find((x) => x.id === a.purchaseId);
-    return { Date: a.date, Student: studentName(a.studentId), Subject: p?.subject || "", "Units Used": a.unitsUsed, Unit: p ? TYPE_CONFIG[p.type].unitName : "", Note: a.note || "" };
+    return { Date: a.date, Student: studentName(a.studentId), Subject: p?.subject || "", "Units Used": a.unitsUsed, Unit: p ? TYPE_CONFIG[p.type].unitName : "", Teacher: a.teacher || "", Note: a.note || "" };
   });
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(attendanceRows), "Attendance");
+
+  const byTeacher = {};
+  attendance.forEach((a) => {
+    if (!a.teacher) return;
+    const p = purchases.find((x) => x.id === a.purchaseId);
+    if (!p) return;
+    byTeacher[a.teacher] = (byTeacher[a.teacher] || 0) + (p.pricePaid / p.totalUnits) * a.unitsUsed;
+  });
+  const teacherRows = Object.entries(byTeacher).sort((a, b) => b[1] - a[1]).map(([teacher, value]) => ({ Teacher: teacher, "Value Taught (THB)": Math.round(value) }));
+  if (teacherRows.length) {
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(teacherRows), "By Teacher");
+  }
+
   return wb;
 }
 
@@ -1077,6 +1151,68 @@ function BackupView({ students, purchases, attendance, usedUnitsByPurchase, rema
 /* ---------- generic UI atoms ---------- */
 
 function SectionTitle({ children }) { return <div className="text-sm font-semibold mb-2" style={{ color: "var(--ink-soft)" }}>{children}</div>; }
+
+function ComboSelect({ value, onChange, options, onAddOption, placeholder }) {
+  const [adding, setAdding] = useState(false);
+  const [draft, setDraft] = useState("");
+
+  if (adding) {
+    return (
+      <div className="flex gap-2">
+        <input
+          className="input flex-1 px-3 py-2.5 text-sm"
+          placeholder={placeholder || "Type new value…"}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              const v = draft.trim();
+              if (!v) return;
+              onAddOption(v);
+              onChange(v);
+              setDraft("");
+              setAdding(false);
+            }
+          }}
+          autoFocus
+        />
+        <button
+          type="button"
+          className="btn btn-primary px-3 py-2.5 text-sm"
+          onClick={() => {
+            const v = draft.trim();
+            if (!v) return;
+            onAddOption(v);
+            onChange(v);
+            setDraft("");
+            setAdding(false);
+          }}
+        >
+          Add
+        </button>
+        <button type="button" className="btn btn-ghost px-3 py-2.5 text-sm" onClick={() => { setAdding(false); setDraft(""); }}>
+          <X size={15} />
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <select
+      className="input w-full px-3 py-2.5 text-sm"
+      value={options.includes(value) ? value : ""}
+      onChange={(e) => {
+        if (e.target.value === "__add_new__") setAdding(true);
+        else onChange(e.target.value);
+      }}
+    >
+      <option value="">Select…</option>
+      {options.map((o) => <option key={o} value={o}>{o}</option>)}
+      <option value="__add_new__">+ Add new…</option>
+    </select>
+  );
+}
 
 function Field({ label, children }) {
   return <label className="flex flex-col gap-1.5"><span className="text-xs font-semibold" style={{ color: "var(--ink-soft)" }}>{label}</span>{children}</label>;
