@@ -50,7 +50,7 @@ import {
   CreditCard, Wallet, Trash2, ChevronRight, AlertCircle, Loader2,
   ArrowLeft, CheckCircle2, Clock, Sun, SunMedium, GraduationCap,
   Download, FileSpreadsheet, ExternalLink, CheckCircle, RefreshCw,
-  Copy, Check, Cloud
+  Copy, Check, Cloud, XCircle, Pencil
 } from "lucide-react";
 
 /* ---------- config ---------- */
@@ -75,20 +75,20 @@ const APPS_SCRIPT_CODE = `function doPost(e) {
   );
 
   writeSheet(ss, 'Purchases',
-    ['ID', 'Student', 'Subject', 'Type', 'Total Units', 'Unit', 'Price Paid',
-     'Payment Method', 'CC Fee (3%)', 'Total Collected', 'Price / Unit',
+    ['ID', 'Student', 'Subject', 'Type', 'Total Units', 'Bonus Units', 'Unit', 'List Price', 'Discount',
+     'Price Paid', 'Payment Method', 'CC Fee (3%)', 'Total Collected', 'Price / Unit',
      'Purchase Date', 'Used', 'Remaining'],
     payload.purchases.map(function (p) {
-      return [p.id, p.studentName, p.subject, p.type, p.totalUnits, p.unitName,
-        p.pricePaid, p.paymentMethod, p.ccFee, p.totalCollected, p.pricePerUnit,
+      return [p.id, p.studentName, p.subject, p.type, p.totalUnits, p.bonusUnits, p.unitName,
+        p.listPrice, p.discount, p.pricePaid, p.paymentMethod, p.ccFee, p.totalCollected, p.pricePerUnit,
         p.purchaseDate, p.used, p.remaining];
     })
   );
 
   writeSheet(ss, 'Attendance',
-    ['Date', 'Student', 'Subject', 'Units Used', 'Unit', 'Teacher', 'Note'],
+    ['Date', 'Student', 'Subject', 'Units Used', 'Unit', 'Teacher', 'Attended', 'Note'],
     payload.attendance.map(function (a) {
-      return [a.date, a.studentName, a.subject, a.unitsUsed, a.unitName, a.teacher, a.note];
+      return [a.date, a.studentName, a.subject, a.unitsUsed, a.unitName, a.teacher, a.attended, a.note];
     })
   );
 
@@ -203,8 +203,11 @@ function App() {
     return m;
   }, [attendance]);
 
+  function capacityOf(p) {
+    return p.totalUnits + (p.bonusUnits || 0);
+  }
   function remainingOf(p) {
-    return Math.max(0, p.totalUnits - (usedUnitsByPurchase[p.id] || 0));
+    return Math.max(0, capacityOf(p) - (usedUnitsByPurchase[p.id] || 0));
   }
   function studentName(id) {
     return students.find((s) => s.id === id)?.name || "—";
@@ -221,10 +224,11 @@ function App() {
         const used = usedUnitsByPurchase[p.id] || 0;
         return {
           id: p.id, studentName: studentName(p.studentId), subject: p.subject, type: cfg.label,
-          totalUnits: p.totalUnits, unitName: cfg.unitName, pricePaid: p.pricePaid,
+          totalUnits: p.totalUnits, bonusUnits: p.bonusUnits || 0, unitName: cfg.unitName,
+          listPrice: p.listPrice != null ? p.listPrice : p.pricePaid, discount: p.discount || 0, pricePaid: p.pricePaid,
           paymentMethod: p.paymentMethod, ccFee: Math.round(fee), totalCollected: Math.round(p.pricePaid + fee),
           pricePerUnit: Math.round((p.pricePaid / p.totalUnits) * 100) / 100,
-          purchaseDate: p.purchaseDate, used, remaining: Math.max(0, p.totalUnits - used),
+          purchaseDate: p.purchaseDate, used, remaining: Math.max(0, capacityOf(p) - used),
         };
       }),
       attendance: attendance.map((a) => {
@@ -232,7 +236,7 @@ function App() {
         return {
           date: a.date, studentName: studentName(a.studentId), subject: p?.subject || "",
           unitsUsed: a.unitsUsed, unitName: p ? TYPE_CONFIG[p.type].unitName : "",
-          teacher: a.teacher || "", note: a.note || "",
+          teacher: a.teacher || "", attended: a.attended === false ? "No (charged)" : "Yes", note: a.note || "",
         };
       }),
     };
@@ -255,7 +259,7 @@ function App() {
   const ctx = {
     students, setStudents, purchases, setPurchases, attendance, setAttendance,
     subjects, setSubjects, teachers, setTeachers,
-    purchasesByStudent, usedUnitsByPurchase, remainingOf, studentName,
+    purchasesByStudent, usedUnitsByPurchase, remainingOf, capacityOf, studentName,
     selectedStudentId, setSelectedStudentId, setTab,
     sheetUrl, setSheetUrl, autoSync, setAutoSync, lastSynced, doSync,
   };
@@ -454,17 +458,18 @@ function CheckInView({ students, purchases, attendance, setAttendance, purchases
         {todays.map((a) => {
           const p = purchases.find((x) => x.id === a.purchaseId);
           return (
-            <div key={a.id} className={`card p-3.5 flex items-center justify-between gap-3 ${justStamped === a.id ? "stamp-pop" : ""}`}>
+            <div key={a.id} className={`card p-3.5 flex items-center justify-between gap-3 ${justStamped === a.id ? "stamp-pop" : ""}`} style={a.attended === false ? { background: "var(--amber-tint)", border: "none" } : {}}>
               <div className="flex items-center gap-3 min-w-0">
-                <div className="flex items-center justify-center rounded-full shrink-0" style={{ width: 36, height: 36, background: "var(--teal)", color: "white" }}>
-                  <CheckCircle2 size={18} />
+                <div className="flex items-center justify-center rounded-full shrink-0" style={{ width: 36, height: 36, background: a.attended === false ? "var(--amber)" : "var(--teal)", color: "white" }}>
+                  {a.attended === false ? <XCircle size={18} /> : <CheckCircle2 size={18} />}
                 </div>
                 <div className="min-w-0">
                   <div className="font-semibold truncate" style={{ color: "var(--ink)" }}>{studentName(a.studentId)}</div>
-                  <div className="text-xs flex items-center gap-1.5 mt-0.5" style={{ color: "var(--ink-soft)" }}>
+                  <div className="text-xs flex items-center gap-1.5 mt-0.5" style={{ color: a.attended === false ? "#92651A" : "var(--ink-soft)" }}>
                     <TypeIcon type={p?.type} size={13} />
                     {p ? `${p.subject} · used ${fmtNum(a.unitsUsed)} ${TYPE_CONFIG[p.type].unitName}${a.unitsUsed !== 1 ? "s" : ""}` : "Package not found"}
                     {a.teacher ? ` · Teacher: ${a.teacher}` : ""}
+                    {a.attended === false ? " · charged, did not attend" : ""}
                   </div>
                 </div>
               </div>
@@ -494,12 +499,14 @@ function CheckInView({ students, purchases, attendance, setAttendance, purchases
 }
 
 function CheckInModal({ date, students, purchasesByStudent, remainingOf, teachers, setTeachers, onClose, onSubmit, onGotoPurchases }) {
+  const HOURS_PER_SESSION = 1.5;
   const [query, setQuery] = useState("");
   const [studentId, setStudentId] = useState(null);
   const [purchaseId, setPurchaseId] = useState(null);
   const [units, setUnits] = useState(1);
   const [teacher, setTeacher] = useState("");
   const [note, setNote] = useState("");
+  const [attended, setAttended] = useState(true);
   function addTeacherOption(v) {
     setTeachers((prev) => (prev.includes(v) ? prev : [...prev, v]));
   }
@@ -562,7 +569,7 @@ function CheckInModal({ date, students, purchasesByStudent, remainingOf, teacher
                             <div className="text-xs" style={{ color: "var(--ink-soft)" }}>{TYPE_CONFIG[p.type].label}</div>
                           </div>
                         </div>
-                        <RemainingBadge remaining={rem} total={p.totalUnits} unitName={TYPE_CONFIG[p.type].unitName} />
+                        <RemainingBadge remaining={rem} total={p.totalUnits + (p.bonusUnits || 0)} unitName={TYPE_CONFIG[p.type].unitName} />
                       </button>
                     );
                   })}
@@ -575,14 +582,33 @@ function CheckInModal({ date, students, purchasesByStudent, remainingOf, teacher
                 <div>
                   <div className="text-xs font-semibold mb-1.5" style={{ color: "var(--ink-soft)" }}>Units used ({TYPE_CONFIG[chosen.type].unitName})</div>
                   <input type="number" min="0.5" step="0.5" max={remainingOf(chosen)} className="input w-full px-3 py-2 text-sm fmono" value={units} onChange={(e) => setUnits(Number(e.target.value))} />
+                  {chosen.type === "course" && (
+                    <div className="text-xs fmono mt-1" style={{ color: "var(--ink-soft)" }}>≈ {fmtNum(units * HOURS_PER_SESSION)} hrs (standard session = {HOURS_PER_SESSION} hrs)</div>
+                  )}
                 </div>
+                {chosen.type === "course" && (
+                  <div>
+                    <div className="text-xs font-semibold mb-1.5" style={{ color: "var(--ink-soft)" }}>Or enter hours attended</div>
+                    <input type="number" min="0.25" step="0.25" className="input w-full px-3 py-2 text-sm fmono" placeholder="e.g. 2"
+                      onChange={(e) => { const h = Number(e.target.value); if (h > 0) setUnits(Math.round((h / HOURS_PER_SESSION) * 100) / 100); }} />
+                    <div className="text-xs fmono mt-1" style={{ color: "var(--ink-soft)" }}>e.g. 2 hrs → {fmtNum(Math.round((2 / HOURS_PER_SESSION) * 100) / 100)} sessions</div>
+                  </div>
+                )}
                 <div>
                   <div className="text-xs font-semibold mb-1.5" style={{ color: "var(--ink-soft)" }}>Note (optional)</div>
                   <input className="input w-full px-3 py-2 text-sm" value={note} onChange={(e) => setNote(e.target.value)} placeholder="e.g. arrived late" />
                 </div>
-                <div style={{ gridColumn: "1 / -1" }}>
+                <div>
                   <div className="text-xs font-semibold mb-1.5" style={{ color: "var(--ink-soft)" }}>Teacher (optional)</div>
                   <ComboSelect value={teacher} onChange={setTeacher} options={teachers} onAddOption={addTeacherOption} placeholder="Teacher name" />
+                </div>
+                <div style={{ gridColumn: "1 / -1" }}>
+                  <label className="flex items-start gap-2 text-sm card p-3" style={{ background: attended ? "transparent" : "var(--amber-tint)", cursor: "pointer" }}>
+                    <input type="checkbox" checked={!attended} onChange={(e) => setAttended(!e.target.checked)} style={{ marginTop: 2 }} />
+                    <span style={{ color: attended ? "var(--ink-soft)" : "#5A4118" }}>
+                      Charged but did not attend <span className="fmono" style={{ opacity: 0.8 }}>(no-show / over makeup limit — still deducts a class, marked as unattended)</span>
+                    </span>
+                  </label>
                 </div>
               </div>
             )}
@@ -592,7 +618,7 @@ function CheckInModal({ date, students, purchasesByStudent, remainingOf, teacher
         <div className="flex justify-end gap-2 pt-1">
           <button className="btn btn-ghost px-4 py-2.5 text-sm" onClick={onClose}>Cancel</button>
           <button className="btn btn-primary px-5 py-2.5 text-sm" disabled={!chosen || !units || units <= 0} style={{ opacity: !chosen || !units || units <= 0 ? 0.45 : 1 }}
-            onClick={() => onSubmit({ studentId, purchaseId: chosen.id, unitsUsed: Number(units), teacher, note })}>
+            onClick={() => onSubmit({ studentId, purchaseId: chosen.id, unitsUsed: Number(units), teacher, attended, note })}>
             Save check-in
           </button>
         </div>
@@ -660,10 +686,10 @@ function StudentsList({ students, setStudents, purchasesByStudent, remainingOf, 
   );
 }
 
-function AddStudentForm({ onSave, onCancel }) {
-  const [name, setName] = useState("");
-  const [phone, setPhone] = useState("");
-  const [note, setNote] = useState("");
+function AddStudentForm({ initial, onSave, onCancel }) {
+  const [name, setName] = useState(initial?.name || "");
+  const [phone, setPhone] = useState(initial?.phone || "");
+  const [note, setNote] = useState(initial?.note || "");
   return (
     <div className="flex flex-col gap-3.5">
       <Field label="Student name *"><input className="input w-full px-3 py-2.5 text-sm" value={name} onChange={(e) => setName(e.target.value)} autoFocus /></Field>
@@ -671,14 +697,15 @@ function AddStudentForm({ onSave, onCancel }) {
       <Field label="Note"><input className="input w-full px-3 py-2.5 text-sm" value={note} onChange={(e) => setNote(e.target.value)} /></Field>
       <div className="flex justify-end gap-2 pt-1">
         <button className="btn btn-ghost px-4 py-2.5 text-sm" onClick={onCancel}>Cancel</button>
-        <button className="btn btn-primary px-5 py-2.5 text-sm" disabled={!name.trim()} style={{ opacity: name.trim() ? 1 : 0.45 }} onClick={() => onSave({ name: name.trim(), phone: phone.trim(), note: note.trim() })}>Save</button>
+        <button className="btn btn-primary px-5 py-2.5 text-sm" disabled={!name.trim()} style={{ opacity: name.trim() ? 1 : 0.45 }} onClick={() => onSave({ name: name.trim(), phone: phone.trim(), note: note.trim() })}>{initial ? "Save changes" : "Save"}</button>
       </div>
     </div>
   );
 }
 
-function StudentProfile({ student, purchases, setPurchases, attendance, setAttendance, purchasesByStudent, usedUnitsByPurchase, remainingOf, setSelectedStudentId, subjects, setSubjects, teachers }) {
+function StudentProfile({ student, students, setStudents, purchases, setPurchases, attendance, setAttendance, purchasesByStudent, usedUnitsByPurchase, remainingOf, setSelectedStudentId, subjects, setSubjects, teachers }) {
   const [addingPurchase, setAddingPurchase] = useState(false);
+  const [editing, setEditing] = useState(false);
   const myPurchases = (purchasesByStudent[student.id] || []).slice().sort((a, b) => (b.purchaseDate || "").localeCompare(a.purchaseDate || ""));
   const myAttendance = attendance.filter((a) => a.studentId === student.id).sort((a, b) => b.date.localeCompare(a.date));
 
@@ -693,8 +720,12 @@ function StudentProfile({ student, purchases, setPurchases, attendance, setAtten
 
       <div className="card p-5 flex items-center justify-between flex-wrap gap-3">
         <div>
-          <div className="fdisplay" style={{ fontSize: 24, fontWeight: 700, color: "var(--ink)" }}>{student.name}</div>
+          <div className="fdisplay flex items-center gap-2" style={{ fontSize: 24, fontWeight: 700, color: "var(--ink)" }}>
+            {student.name}
+            <button className="p-1 rounded-full" style={{ color: "var(--ink-soft)", background: "none", border: "none" }} onClick={() => setEditing(true)} title="Edit student"><Pencil size={16} /></button>
+          </div>
           {student.phone && <div className="text-sm fmono mt-1" style={{ color: "var(--ink-soft)" }}>{student.phone}</div>}
+          {student.note && <div className="text-sm mt-1" style={{ color: "var(--ink-soft)" }}>{student.note}</div>}
         </div>
         <button className="btn btn-primary flex items-center gap-1.5 px-4 py-2.5 text-sm" onClick={() => setAddingPurchase(true)}><Plus size={17} /> Add package</button>
       </div>
@@ -715,11 +746,12 @@ function StudentProfile({ student, purchases, setPurchases, attendance, setAtten
             {myAttendance.map((a) => {
               const p = purchases.find((x) => x.id === a.purchaseId);
               return (
-                <div key={a.id} className="flex items-center justify-between px-4 py-2.5">
+                <div key={a.id} className="flex items-center justify-between px-4 py-2.5" style={a.attended === false ? { background: "var(--amber-tint)" } : {}}>
                   <div className="flex items-center gap-2 text-sm">
                     <span className="fmono" style={{ color: "var(--ink-soft)" }}>{fmtDate(a.date)}</span>
                     <span style={{ color: "var(--ink)" }}>{p?.subject || "—"}</span>
                     {a.teacher && <span className="text-xs" style={{ color: "var(--ink-soft)" }}>· {a.teacher}</span>}
+                    {a.attended === false && <span className="text-xs" style={{ color: "#92651A" }}>· charged, absent</span>}
                   </div>
                   <span className="text-xs fmono" style={{ color: "var(--ink-soft)" }}>{fmtNum(a.unitsUsed)} {p ? TYPE_CONFIG[p.type].unitName : ""}{a.unitsUsed !== 1 ? "s" : ""}</span>
                 </div>
@@ -734,6 +766,19 @@ function StudentProfile({ student, purchases, setPurchases, attendance, setAtten
           <AddPurchaseForm subjects={subjects} setSubjects={setSubjects} onCancel={() => setAddingPurchase(false)} onSave={(purchase) => { const id = uid(); setPurchases((prev) => [...prev, { ...purchase, id, studentId: student.id }]); setAddingPurchase(false); }} />
         </Modal>
       )}
+
+      {editing && (
+        <Modal onClose={() => setEditing(false)} title="Edit student">
+          <AddStudentForm
+            initial={student}
+            onCancel={() => setEditing(false)}
+            onSave={(updated) => {
+              setStudents((prev) => prev.map((s) => (s.id === student.id ? { ...s, ...updated } : s)));
+              setEditing(false);
+            }}
+          />
+        </Modal>
+      )}
     </div>
   );
 }
@@ -742,14 +787,21 @@ function PurchaseCard({ p, remaining, used, onDelete }) {
   const cfg = TYPE_CONFIG[p.type];
   const fee = ccFeeOf(p.pricePaid, p.paymentMethod);
   const total = p.pricePaid + fee;
-  const pct = Math.min(100, Math.round((used / p.totalUnits) * 100));
+  const bonus = p.bonusUnits || 0;
+  const capacity = p.totalUnits + bonus;
+  const discount = p.discount || 0;
+  const pct = Math.min(100, Math.round((used / capacity) * 100));
   return (
     <div className="card p-4">
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-center gap-2.5">
           <div className="flex items-center justify-center rounded-lg shrink-0" style={{ width: 36, height: 36, background: "var(--teal-tint)", color: "var(--teal-dark)" }}><TypeIcon type={p.type} size={18} /></div>
           <div>
-            <div className="font-semibold" style={{ color: "var(--ink)" }}>{p.subject}</div>
+            <div className="font-semibold flex items-center gap-1.5" style={{ color: "var(--ink)" }}>
+              {p.subject}
+              {bonus > 0 && <span className="badge" style={{ background: "var(--amber-tint)", color: "#92651A" }}>+{fmtNum(bonus)} bonus</span>}
+              {discount > 0 && <span className="badge" style={{ background: "var(--coral-tint)", color: "var(--coral)" }}>-{fmtBaht(discount)} off</span>}
+            </div>
             <div className="text-xs" style={{ color: "var(--ink-soft)" }}>{cfg.label} · purchased {fmtDate(p.purchaseDate)}</div>
           </div>
         </div>
@@ -760,12 +812,12 @@ function PurchaseCard({ p, remaining, used, onDelete }) {
           <div className="h-full rounded-full" style={{ width: `${pct}%`, background: remaining === 0 ? "var(--coral)" : "var(--teal)" }} />
         </div>
         <div className="flex items-center justify-between mt-1.5">
-          <span className="text-xs fmono" style={{ color: "var(--ink-soft)" }}>Used {fmtNum(used)}/{fmtNum(p.totalUnits)} {cfg.unitName}{p.totalUnits !== 1 ? "s" : ""}</span>
-          <RemainingBadge remaining={remaining} total={p.totalUnits} unitName={cfg.unitName} />
+          <span className="text-xs fmono" style={{ color: "var(--ink-soft)" }}>Used {fmtNum(used)}/{fmtNum(capacity)} {cfg.unitName}{capacity !== 1 ? "s" : ""}</span>
+          <RemainingBadge remaining={remaining} total={capacity} unitName={cfg.unitName} />
         </div>
       </div>
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-3 pt-3 text-xs fmono" style={{ borderTop: "1px solid var(--line)", color: "var(--ink-soft)" }}>
-        <span>Package {fmtBaht(p.pricePaid)}</span>
+        <span>Paid {fmtBaht(p.pricePaid)}{discount > 0 ? ` (full ${fmtBaht(p.listPrice != null ? p.listPrice : p.pricePaid)})` : ""}</span>
         <span>· per {cfg.unitName} {fmtBaht(p.pricePaid / p.totalUnits)}</span>
         <span className="flex items-center gap-1">{p.paymentMethod === "credit" ? <CreditCard size={12} /> : <Wallet size={12} />} {p.paymentMethod === "credit" ? `Credit card (+3% = ${fmtBaht(fee)})` : "Cash"}</span>
         {p.paymentMethod === "credit" && <span>· charged total {fmtBaht(total)}</span>}
@@ -819,7 +871,7 @@ function PurchasesView({ students, purchases, setPurchases, attendance, setAtten
               </div>
               <div className="flex items-center gap-3 flex-wrap">
                 <span className="text-xs fmono" style={{ color: "var(--ink-soft)" }}>{fmtBaht(p.pricePaid)}{p.paymentMethod === "credit" ? ` +${fmtBaht(fee)}` : ""}</span>
-                <RemainingBadge remaining={rem} total={p.totalUnits} unitName={cfg.unitName} />
+                <RemainingBadge remaining={rem} total={p.totalUnits + (p.bonusUnits || 0)} unitName={cfg.unitName} />
                 <button className="btn-danger p-1.5" onClick={() => deletePurchase(p.id)}><Trash2 size={15} /></button>
               </div>
             </div>
@@ -841,17 +893,23 @@ function AddPurchaseForm({ students, requireStudentPicker, subjects, setSubjects
   const [subject, setSubject] = useState("");
   const [type, setType] = useState("course");
   const [totalUnits, setTotalUnits] = useState(TYPE_CONFIG.course.defaultUnits);
+  const [bonusUnits, setBonusUnits] = useState(0);
   const [price, setPrice] = useState("");
+  const [discount, setDiscount] = useState("");
   const [method, setMethod] = useState("cash");
   const [purchaseDate, setPurchaseDate] = useState(todayStr());
 
   useEffect(() => { setTotalUnits(TYPE_CONFIG[type].defaultUnits); }, [type]);
 
-  const priceNum = Number(price) || 0;
+  const listPriceNum = Number(price) || 0;
+  const discountNum = Number(discount) || 0;
+  const priceNum = Math.max(0, listPriceNum - discountNum);
   const fee = ccFeeOf(priceNum, method);
   const total = priceNum + fee;
+  const bonusNum = Number(bonusUnits) || 0;
+  const capacity = totalUnits + bonusNum;
   const perUnit = totalUnits > 0 ? priceNum / totalUnits : 0;
-  const canSave = subject && subject.trim() && totalUnits > 0 && priceNum > 0 && (!requireStudentPicker || studentId);
+  const canSave = subject && subject.trim() && totalUnits > 0 && listPriceNum > 0 && (!requireStudentPicker || studentId);
   function addSubjectOption(v) {
     setSubjects((prev) => (prev.includes(v) ? prev : [...prev, v]));
   }
@@ -880,19 +938,33 @@ function AddPurchaseForm({ students, requireStudentPicker, subjects, setSubjects
         </div>
       </Field>
       <div className="grid grid-cols-2 gap-3">
-        <Field label={`Quantity (${TYPE_CONFIG[type].unitName}s) *`}><input type="number" min="1" step="0.5" className="input w-full px-3 py-2.5 text-sm fmono" value={totalUnits} onChange={(e) => setTotalUnits(Number(e.target.value))} /></Field>
-        <Field label="Purchase date"><input type="date" className="input w-full px-3 py-2.5 text-sm fmono" value={purchaseDate} onChange={(e) => setPurchaseDate(e.target.value)} /></Field>
+        <Field label={`Paid quantity (${TYPE_CONFIG[type].unitName}s) *`}><input type="number" min="1" step="0.5" className="input w-full px-3 py-2.5 text-sm fmono" value={totalUnits} onChange={(e) => setTotalUnits(Number(e.target.value))} /></Field>
+        <Field label={`Bonus ${TYPE_CONFIG[type].unitName}s (free, optional)`}><input type="number" min="0" step="0.5" className="input w-full px-3 py-2.5 text-sm fmono" placeholder="0" value={bonusUnits} onChange={(e) => setBonusUnits(e.target.value)} /></Field>
       </div>
-      <Field label="Package price (THB) *"><input type="number" min="0" className="input w-full px-3 py-2.5 text-sm fmono" placeholder="0" value={price} onChange={(e) => setPrice(e.target.value)} /></Field>
+      {bonusNum > 0 && (
+        <div className="text-xs fmono" style={{ color: "var(--teal-dark)", marginTop: -6 }}>
+          Total available: {fmtNum(capacity)} {TYPE_CONFIG[type].unitName}{capacity !== 1 ? "s" : ""} ({fmtNum(totalUnits)} paid + {fmtNum(bonusNum)} bonus)
+        </div>
+      )}
+      <Field label="Purchase date"><input type="date" className="input w-full px-3 py-2.5 text-sm fmono" value={purchaseDate} onChange={(e) => setPurchaseDate(e.target.value)} /></Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Full price (THB) *"><input type="number" min="0" className="input w-full px-3 py-2.5 text-sm fmono" placeholder="0" value={price} onChange={(e) => setPrice(e.target.value)} /></Field>
+        <Field label="Discount (THB, optional)"><input type="number" min="0" className="input w-full px-3 py-2.5 text-sm fmono" placeholder="0" value={discount} onChange={(e) => setDiscount(e.target.value)} /></Field>
+      </div>
       <Field label="Payment method">
         <div className="grid grid-cols-2 gap-2">
           <button onClick={() => setMethod("cash")} className="flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-medium" style={{ border: method === "cash" ? "2px solid var(--teal)" : "1px solid var(--line)", background: method === "cash" ? "var(--teal-tint)" : "transparent", color: "var(--ink)" }}><Wallet size={16} /> Cash / transfer</button>
           <button onClick={() => setMethod("credit")} className="flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-medium" style={{ border: method === "credit" ? "2px solid var(--teal)" : "1px solid var(--line)", background: method === "credit" ? "var(--teal-tint)" : "transparent", color: "var(--ink)" }}><CreditCard size={16} /> Credit card (+3%)</button>
         </div>
       </Field>
-      {priceNum > 0 && totalUnits > 0 && (
+      {listPriceNum > 0 && totalUnits > 0 && (
         <div className="card p-3.5 fmono text-xs flex flex-col gap-1" style={{ background: "var(--teal-tint)", border: "none" }}>
-          <div className="flex justify-between"><span>Price per {TYPE_CONFIG[type].unitName}</span><span className="font-semibold">{fmtBaht(perUnit)}</span></div>
+          {discountNum > 0 && (<>
+            <div className="flex justify-between"><span>Full price</span><span>{fmtBaht(listPriceNum)}</span></div>
+            <div className="flex justify-between"><span>Discount</span><span>-{fmtBaht(discountNum)}</span></div>
+          </>)}
+          <div className="flex justify-between"><span>Net price paid</span><span className="font-semibold">{fmtBaht(priceNum)}</span></div>
+          <div className="flex justify-between"><span>Price per {TYPE_CONFIG[type].unitName} (paid units)</span><span className="font-semibold">{fmtBaht(perUnit)}</span></div>
           {method === "credit" && (<>
             <div className="flex justify-between"><span>Credit card fee (3%)</span><span className="font-semibold">{fmtBaht(fee)}</span></div>
             <div className="flex justify-between" style={{ borderTop: "1px solid rgba(0,0,0,0.08)", paddingTop: 4, marginTop: 2 }}><span>Total charged to customer</span><span className="font-semibold">{fmtBaht(total)}</span></div>
@@ -902,7 +974,12 @@ function AddPurchaseForm({ students, requireStudentPicker, subjects, setSubjects
       <div className="flex justify-end gap-2 pt-1">
         <button className="btn btn-ghost px-4 py-2.5 text-sm" onClick={onCancel}>Cancel</button>
         <button className="btn btn-primary px-5 py-2.5 text-sm" disabled={!canSave} style={{ opacity: canSave ? 1 : 0.45 }}
-          onClick={() => onSave({ studentId: requireStudentPicker ? studentId : undefined, subject: subject.trim(), type, totalUnits: Number(totalUnits), pricePaid: priceNum, paymentMethod: method, purchaseDate })}>
+          onClick={() => onSave({
+            studentId: requireStudentPicker ? studentId : undefined, subject: subject.trim(), type,
+            totalUnits: Number(totalUnits), bonusUnits: bonusNum,
+            listPrice: listPriceNum, discount: discountNum, pricePaid: priceNum,
+            paymentMethod: method, purchaseDate,
+          })}>
           Save package
         </button>
       </div>
@@ -917,10 +994,13 @@ function AddPurchaseForm({ students, requireStudentPicker, subjects, setSubjects
 function ReportsView({ students, purchases, attendance, remainingOf, studentName }) {
   const totalRevenue = purchases.reduce((sum, p) => sum + p.pricePaid + ccFeeOf(p.pricePaid, p.paymentMethod), 0);
   const totalFees = purchases.reduce((sum, p) => sum + ccFeeOf(p.pricePaid, p.paymentMethod), 0);
+  const totalDiscounts = purchases.reduce((sum, p) => sum + (p.discount || 0), 0);
+  const totalBonusUnits = purchases.reduce((sum, p) => sum + (p.bonusUnits || 0), 0);
+  const noShowCount = attendance.filter((a) => a.attended === false).length;
   const thisMonth = todayStr().slice(0, 7);
   const attendanceThisMonth = attendance.filter((a) => a.date.slice(0, 7) === thisMonth).length;
 
-  const lowBalance = purchases.map((p) => ({ p, rem: remainingOf(p) })).filter(({ p, rem }) => rem > 0 && rem <= Math.max(1, Math.round(p.totalUnits * 0.2))).sort((a, b) => a.rem - b.rem);
+  const lowBalance = purchases.map((p) => ({ p, rem: remainingOf(p) })).filter(({ p, rem }) => rem > 0 && rem <= Math.max(1, Math.round((p.totalUnits + (p.bonusUnits || 0)) * 0.2))).sort((a, b) => a.rem - b.rem);
 
   const bySubject = {};
   purchases.forEach((p) => { bySubject[p.subject] = (bySubject[p.subject] || 0) + p.pricePaid + ccFeeOf(p.pricePaid, p.paymentMethod); });
@@ -948,6 +1028,9 @@ function ReportsView({ students, purchases, attendance, remainingOf, studentName
         <StatCard label="Total packages" value={purchases.length.toString()} icon={BookOpenCheck} />
         <StatCard label="Total revenue" value={fmtBaht(totalRevenue)} icon={Wallet} />
         <StatCard label="Total card fees" value={fmtBaht(totalFees)} icon={CreditCard} />
+        <StatCard label="Total discounts given" value={fmtBaht(totalDiscounts)} icon={Wallet} />
+        <StatCard label="Bonus classes given" value={fmtNum(totalBonusUnits)} icon={BookOpenCheck} />
+        <StatCard label="Charged absences" value={noShowCount.toString()} icon={AlertCircle} />
       </div>
       <div className="card p-4">
         <div className="text-sm font-semibold mb-0.5" style={{ color: "var(--ink)" }}>Check-ins this month</div>
@@ -987,13 +1070,33 @@ function ReportsView({ students, purchases, attendance, remainingOf, studentName
         )}
       </div>
       <div>
+        <SectionTitle>Charged absences (billed but did not attend)</SectionTitle>
+        {noShowCount === 0 ? <div className="text-sm" style={{ color: "var(--ink-soft)" }}>None recorded</div> : (
+          <div className="card divide-y">
+            {attendance.filter((a) => a.attended === false).sort((a, b) => b.date.localeCompare(a.date)).map((a) => {
+              const p = purchases.find((x) => x.id === a.purchaseId);
+              return (
+                <div key={a.id} className="flex items-center justify-between px-4 py-2.5">
+                  <div className="text-sm">
+                    <span className="fmono" style={{ color: "var(--ink-soft)" }}>{fmtDate(a.date)}</span>{" "}
+                    <span className="font-medium" style={{ color: "var(--ink)" }}>{studentName(a.studentId)}</span>
+                    <span style={{ color: "var(--ink-soft)" }}> · {p?.subject || "—"}</span>
+                  </div>
+                  <span className="text-xs fmono" style={{ color: "var(--coral)" }}>{fmtNum(a.unitsUsed)} {p ? TYPE_CONFIG[p.type].unitName : ""}{a.unitsUsed !== 1 ? "s" : ""} charged</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+      <div>
         <SectionTitle>Running low (follow up)</SectionTitle>
         {lowBalance.length === 0 ? <div className="text-sm" style={{ color: "var(--ink-soft)" }}>No packages running low right now</div> : (
           <div className="card divide-y">
             {lowBalance.map(({ p, rem }) => (
               <div key={p.id} className="flex items-center justify-between px-4 py-2.5">
                 <div className="text-sm"><span className="font-medium" style={{ color: "var(--ink)" }}>{studentName(p.studentId)}</span><span style={{ color: "var(--ink-soft)" }}> · {p.subject}</span></div>
-                <RemainingBadge remaining={rem} total={p.totalUnits} unitName={TYPE_CONFIG[p.type].unitName} />
+                <RemainingBadge remaining={rem} total={p.totalUnits + (p.bonusUnits || 0)} unitName={TYPE_CONFIG[p.type].unitName} />
               </div>
             ))}
           </div>
@@ -1040,7 +1143,7 @@ function buildWorkbook({ students, purchases, attendance, usedUnitsByPurchase, r
 
   const attendanceRows = attendance.slice().sort((a, b) => a.date.localeCompare(b.date)).map((a) => {
     const p = purchases.find((x) => x.id === a.purchaseId);
-    return { Date: a.date, Student: studentName(a.studentId), Subject: p?.subject || "", "Units Used": a.unitsUsed, Unit: p ? TYPE_CONFIG[p.type].unitName : "", Teacher: a.teacher || "", Note: a.note || "" };
+    return { Date: a.date, Student: studentName(a.studentId), Subject: p?.subject || "", "Units Used": a.unitsUsed, Unit: p ? TYPE_CONFIG[p.type].unitName : "", Teacher: a.teacher || "", Status: a.attended === false ? "Charged, absent" : "Attended", Note: a.note || "" };
   });
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(attendanceRows), "Attendance");
 
