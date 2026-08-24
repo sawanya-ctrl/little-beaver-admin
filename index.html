@@ -75,12 +75,13 @@ const APPS_SCRIPT_CODE = `function doPost(e) {
   );
 
   writeSheet(ss, 'Purchases',
-    ['ID', 'Student', 'Subject', 'Type', 'Total Units', 'Bonus Units', 'Unit', 'List Price', 'Discount',
-     'Price Paid', 'Payment Method', 'CC Fee (3%)', 'Total Collected', 'Price / Unit',
+    ['ID', 'Student', 'Subject', 'Type', 'Total Units', 'Bonus Units', 'Unit', 'List Price', 'Discount Type', 'Discount Value', 'Discount Amount',
+     'Price Paid', 'Payment Method', 'CC Charged to Customer', 'CC Fee Cost (bank)', 'Customer Charged', 'School Net Revenue', 'Price / Unit',
      'Purchase Date', 'Used', 'Remaining'],
     payload.purchases.map(function (p) {
       return [p.id, p.studentName, p.subject, p.type, p.totalUnits, p.bonusUnits, p.unitName,
-        p.listPrice, p.discount, p.pricePaid, p.paymentMethod, p.ccFee, p.totalCollected, p.pricePerUnit,
+        p.listPrice, p.discountType, p.discountValue, p.discountAmount, p.pricePaid, p.paymentMethod,
+        p.ccChargeExtra, p.ccFeeCost, p.customerCharged, p.netRevenue, p.pricePerUnit,
         p.purchaseDate, p.used, p.remaining];
     })
   );
@@ -89,6 +90,13 @@ const APPS_SCRIPT_CODE = `function doPost(e) {
     ['Date', 'Student', 'Subject', 'Units Used', 'Unit', 'Teacher', 'Attended', 'Note'],
     payload.attendance.map(function (a) {
       return [a.date, a.studentName, a.subject, a.unitsUsed, a.unitName, a.teacher, a.attended, a.note];
+    })
+  );
+
+  writeSheet(ss, 'Registration Fees',
+    ['Student', 'Amount', 'Status', 'Date', 'Note'],
+    payload.registrationFees.map(function (r) {
+      return [r.studentName, r.amount, r.status, r.date, r.note];
     })
   );
 
@@ -141,6 +149,24 @@ function ccFeeOf(price, method) {
   return method === "credit" ? price * CC_RATE : 0;
 }
 
+// The 3% card-network fee is a cost the school owes the bank — never course revenue.
+// chargeExtra = true: customer pays price+3% themselves, fee is a pure pass-through (school nets full price).
+// chargeExtra = false: customer pays price only, school absorbs the 3% out of that price (school nets price*0.97).
+// Older saved purchases have no ccChargeExtra field — default them to true to match original behavior.
+function ccBreakdown(p) {
+  if (p.paymentMethod !== "credit") {
+    return { feeCost: 0, customerCharged: p.pricePaid, netRevenue: p.pricePaid, chargeExtra: false };
+  }
+  const chargeExtra = p.ccChargeExtra !== false;
+  const feeCost = p.pricePaid * CC_RATE;
+  return {
+    feeCost,
+    customerCharged: chargeExtra ? p.pricePaid + feeCost : p.pricePaid,
+    netRevenue: chargeExtra ? p.pricePaid : p.pricePaid - feeCost,
+    chargeExtra,
+  };
+}
+
 /* ---------- root ---------- */
 
 function App() {
@@ -150,6 +176,7 @@ function App() {
   const [attendance, setAttendance] = useState([]);
   const [subjects, setSubjects] = useState([]);
   const [teachers, setTeachers] = useState([]);
+  const [registrationFees, setRegistrationFees] = useState([]);
   const [sheetUrl, setSheetUrl] = useState("");
   const [autoSync, setAutoSync] = useState(false);
   const [lastSynced, setLastSynced] = useState(null);
@@ -172,6 +199,7 @@ function App() {
         const teachSet = new Set(data.teachers || []);
         (data.attendance || []).forEach((a) => a.teacher && teachSet.add(a.teacher));
         setTeachers(Array.from(teachSet));
+        setRegistrationFees(data.registrationFees || []);
         setSheetUrl(data.sheetUrl || "");
         setAutoSync(!!data.autoSync);
         setLastSynced(data.lastSynced || null);
@@ -184,16 +212,18 @@ function App() {
   useEffect(() => {
     if (!loadedRef.current) return;
     const t = setTimeout(() => {
-      storageSet(STORAGE_KEY, JSON.stringify({ students, purchases, attendance, subjects, teachers, sheetUrl, autoSync, lastSynced }));
+      storageSet(STORAGE_KEY, JSON.stringify({ students, purchases, attendance, subjects, teachers, registrationFees, sheetUrl, autoSync, lastSynced }));
       if (autoSync && sheetUrl) doSync();
     }, 350);
     return () => clearTimeout(t);
     // eslint-disable-next-line
-  }, [students, purchases, attendance, subjects, teachers]);
+  }, [students, purchases, attendance, subjects, teachers, registrationFees]);
 
   const purchasesByStudent = useMemo(() => {
     const m = {};
-    purchases.forEach((p) => { (m[p.studentId] ||= []).push(p); });
+    purchases.forEach((p) => {
+      (p.studentIds || [p.studentId]).forEach((sid) => { (m[sid] ||= []).push(p); });
+    });
     return m;
   }, [purchases]);
 
@@ -220,13 +250,16 @@ function App() {
       students: students.map((s) => ({ id: s.id, name: s.name, phone: s.phone || "", note: s.note || "" })),
       purchases: purchases.map((p) => {
         const cfg = TYPE_CONFIG[p.type];
-        const fee = ccFeeOf(p.pricePaid, p.paymentMethod);
+        const cc = ccBreakdown(p);
         const used = usedUnitsByPurchase[p.id] || 0;
+        const names = (p.studentIds || [p.studentId]).map(studentName).join(" & ");
         return {
-          id: p.id, studentName: studentName(p.studentId), subject: p.subject, type: cfg.label,
+          id: p.id, studentName: names, subject: p.subject, type: cfg.label,
           totalUnits: p.totalUnits, bonusUnits: p.bonusUnits || 0, unitName: cfg.unitName,
-          listPrice: p.listPrice != null ? p.listPrice : p.pricePaid, discount: p.discount || 0, pricePaid: p.pricePaid,
-          paymentMethod: p.paymentMethod, ccFee: Math.round(fee), totalCollected: Math.round(p.pricePaid + fee),
+          listPrice: p.listPrice != null ? p.listPrice : p.pricePaid,
+          discountType: p.discountType || "amount", discountValue: p.discountValue || 0, discountAmount: p.discountAmount || p.discount || 0,
+          pricePaid: p.pricePaid, paymentMethod: p.paymentMethod,
+          ccChargeExtra: cc.chargeExtra, ccFeeCost: Math.round(cc.feeCost), customerCharged: Math.round(cc.customerCharged), netRevenue: Math.round(cc.netRevenue),
           pricePerUnit: Math.round((p.pricePaid / p.totalUnits) * 100) / 100,
           purchaseDate: p.purchaseDate, used, remaining: Math.max(0, capacityOf(p) - used),
         };
@@ -239,6 +272,9 @@ function App() {
           teacher: a.teacher || "", attended: a.attended === false ? "No (charged)" : "Yes", note: a.note || "",
         };
       }),
+      registrationFees: registrationFees.map((r) => ({
+        studentName: studentName(r.studentId), amount: r.amount, status: r.status, date: r.date, note: r.note || "",
+      })),
     };
     try {
       await fetch(sheetUrl, {
@@ -249,7 +285,7 @@ function App() {
       });
       const now = Date.now();
       setLastSynced(now);
-      storageSet(STORAGE_KEY, JSON.stringify({ students, purchases, attendance, subjects, teachers, sheetUrl, autoSync, lastSynced: now }));
+      storageSet(STORAGE_KEY, JSON.stringify({ students, purchases, attendance, subjects, teachers, registrationFees, sheetUrl, autoSync, lastSynced: now }));
       return true;
     } catch (e) {
       return false;
@@ -258,7 +294,7 @@ function App() {
 
   const ctx = {
     students, setStudents, purchases, setPurchases, attendance, setAttendance,
-    subjects, setSubjects, teachers, setTeachers,
+    subjects, setSubjects, teachers, setTeachers, registrationFees, setRegistrationFees,
     purchasesByStudent, usedUnitsByPurchase, remainingOf, capacityOf, studentName,
     selectedStudentId, setSelectedStudentId, setTab,
     sheetUrl, setSheetUrl, autoSync, setAutoSync, lastSynced, doSync,
@@ -703,15 +739,69 @@ function AddStudentForm({ initial, onSave, onCancel }) {
   );
 }
 
-function StudentProfile({ student, students, setStudents, purchases, setPurchases, attendance, setAttendance, purchasesByStudent, usedUnitsByPurchase, remainingOf, setSelectedStudentId, subjects, setSubjects, teachers }) {
+function RegistrationFeeForm({ onSave, onCancel }) {
+  const [amount, setAmount] = useState(2500);
+  const [status, setStatus] = useState("paid");
+  const [date, setDate] = useState(todayStr());
+  const [note, setNote] = useState("");
+  const options = [
+    { id: "paid", label: "Collected (kept, not usable as discount)", hint: "Standard — one-time fee, no future credit" },
+    { id: "credit", label: "Collected, usable as credit next renewal", hint: "Can be applied as a discount on their next course purchase" },
+    { id: "waived", label: "Waived (not charged)", hint: "e.g. already knew the family before enrolling" },
+  ];
+  return (
+    <div className="flex flex-col gap-3.5">
+      <Field label="Amount (THB)"><input type="number" min="0" className="input w-full px-3 py-2.5 text-sm fmono" value={amount} onChange={(e) => setAmount(e.target.value)} /></Field>
+      <Field label="Status">
+        <div className="flex flex-col gap-2">
+          {options.map((o) => (
+            <button key={o.id} type="button" onClick={() => setStatus(o.id)} className="flex flex-col items-start px-3 py-2.5 rounded-lg text-left text-sm" style={{ border: status === o.id ? "2px solid var(--teal)" : "1px solid var(--line)", background: status === o.id ? "var(--teal-tint)" : "transparent" }}>
+              <span className="font-medium" style={{ color: "var(--ink)" }}>{o.label}</span>
+              <span className="text-xs" style={{ color: "var(--ink-soft)" }}>{o.hint}</span>
+            </button>
+          ))}
+        </div>
+      </Field>
+      <Field label="Date"><input type="date" className="input w-full px-3 py-2.5 text-sm fmono" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+      <Field label="Note (optional)"><input className="input w-full px-3 py-2.5 text-sm" value={note} onChange={(e) => setNote(e.target.value)} /></Field>
+      <div className="flex justify-end gap-2 pt-1">
+        <button className="btn btn-ghost px-4 py-2.5 text-sm" onClick={onCancel}>Cancel</button>
+        <button className="btn btn-primary px-5 py-2.5 text-sm" onClick={() => onSave({ amount: Number(amount) || 0, status, date, note: note.trim(), creditUsedInPurchaseId: null })}>Save</button>
+      </div>
+    </div>
+  );
+}
+
+function StudentProfile({ student, students, setStudents, purchases, setPurchases, attendance, setAttendance, purchasesByStudent, usedUnitsByPurchase, remainingOf, setSelectedStudentId, subjects, setSubjects, teachers, registrationFees, setRegistrationFees }) {
   const [addingPurchase, setAddingPurchase] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [addingFee, setAddingFee] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const myPurchases = (purchasesByStudent[student.id] || []).slice().sort((a, b) => (b.purchaseDate || "").localeCompare(a.purchaseDate || ""));
   const myAttendance = attendance.filter((a) => a.studentId === student.id).sort((a, b) => b.date.localeCompare(a.date));
+  const myFees = registrationFees.filter((r) => r.studentId === student.id).sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+  const availableCredit = myFees.find((r) => r.status === "credit" && !r.creditUsedInPurchaseId);
 
   function deletePurchase(id) {
     setPurchases((prev) => prev.filter((p) => p.id !== id));
     setAttendance((prev) => prev.filter((a) => a.purchaseId !== id));
+  }
+  function deleteFee(id) {
+    setRegistrationFees((prev) => prev.filter((r) => r.id !== id));
+  }
+  function studentNameOf(id) {
+    return students.find((s) => s.id === id)?.name || "—";
+  }
+  function deleteStudent() {
+    setPurchases((prev) =>
+      prev
+        .map((p) => ({ ...p, studentIds: (p.studentIds || [p.studentId]).filter((sid) => sid !== student.id) }))
+        .filter((p) => (p.studentIds || []).length > 0)
+    );
+    setAttendance((prev) => prev.filter((a) => a.studentId !== student.id));
+    setRegistrationFees((prev) => prev.filter((r) => r.studentId !== student.id));
+    setStudents((prev) => prev.filter((s) => s.id !== student.id));
+    setSelectedStudentId(null);
   }
 
   return (
@@ -723,6 +813,7 @@ function StudentProfile({ student, students, setStudents, purchases, setPurchase
           <div className="fdisplay flex items-center gap-2" style={{ fontSize: 24, fontWeight: 700, color: "var(--ink)" }}>
             {student.name}
             <button className="p-1 rounded-full" style={{ color: "var(--ink-soft)", background: "none", border: "none" }} onClick={() => setEditing(true)} title="Edit student"><Pencil size={16} /></button>
+            <button className="p-1 rounded-full" style={{ color: "var(--coral)", background: "none", border: "none" }} onClick={() => setConfirmDelete(true)} title="Delete student"><Trash2 size={16} /></button>
           </div>
           {student.phone && <div className="text-sm fmono mt-1" style={{ color: "var(--ink-soft)" }}>{student.phone}</div>}
           {student.note && <div className="text-sm mt-1" style={{ color: "var(--ink-soft)" }}>{student.note}</div>}
@@ -730,11 +821,58 @@ function StudentProfile({ student, students, setStudents, purchases, setPurchase
         <button className="btn btn-primary flex items-center gap-1.5 px-4 py-2.5 text-sm" onClick={() => setAddingPurchase(true)}><Plus size={17} /> Add package</button>
       </div>
 
+      {confirmDelete && (
+        <div className="card p-4 flex flex-wrap items-center justify-between gap-3" style={{ background: "var(--coral-tint)", border: "none" }}>
+          <div className="text-sm" style={{ color: "var(--coral)" }}>
+            Delete {student.name}? This removes their attendance history and registration fee records. Packages shared with a sibling stay intact for the sibling; packages only theirs are deleted too.
+          </div>
+          <div className="flex gap-2 shrink-0">
+            <button className="btn btn-ghost px-3 py-2 text-sm" onClick={() => setConfirmDelete(false)}>Cancel</button>
+            <button className="btn px-3 py-2 text-sm" style={{ background: "var(--coral)", color: "white" }} onClick={deleteStudent}>Delete</button>
+          </div>
+        </div>
+      )}
+
+      <div>
+        <SectionTitle>Registration fee</SectionTitle>
+        {myFees.length === 0 ? (
+          <div className="card p-4 flex items-center justify-between gap-3">
+            <div className="text-sm" style={{ color: "var(--ink-soft)" }}>No registration fee recorded for this student yet</div>
+            <button className="btn btn-ghost px-3 py-2 text-sm shrink-0" onClick={() => setAddingFee(true)}>Add</button>
+          </div>
+        ) : (
+          <div className="card p-4 flex flex-col gap-2.5">
+            {myFees.map((r) => (
+              <div key={r.id} className="flex items-center justify-between gap-3">
+                <div className="text-sm">
+                  <span className="font-medium" style={{ color: "var(--ink)" }}>{fmtBaht(r.amount)}</span>{" "}
+                  <span
+                    className="badge fmono"
+                    style={{
+                      background: r.status === "waived" ? "var(--teal-tint)" : r.status === "credit" ? "var(--amber-tint)" : "var(--coral-tint)",
+                      color: r.status === "waived" ? "var(--teal-dark)" : r.status === "credit" ? "#92651A" : "var(--coral)",
+                    }}
+                  >
+                    {r.status === "waived" ? "Waived" : r.status === "credit" ? (r.creditUsedInPurchaseId ? "Credit used" : "Credit available") : "Collected"}
+                  </span>
+                  <div className="text-xs mt-0.5" style={{ color: "var(--ink-soft)" }}>{fmtDate(r.date)}{r.note ? ` · ${r.note}` : ""}</div>
+                </div>
+                <button className="btn-danger p-1.5 shrink-0" onClick={() => deleteFee(r.id)}><Trash2 size={15} /></button>
+              </div>
+            ))}
+            <button className="btn btn-ghost px-3 py-2 text-sm w-fit" onClick={() => setAddingFee(true)}>+ Add another</button>
+          </div>
+        )}
+      </div>
+
       <div>
         <SectionTitle>Packages purchased</SectionTitle>
         {myPurchases.length === 0 ? <Empty icon={BookOpenCheck} title="No packages yet" sub="Add a package so this student can be checked in" /> : (
           <div className="flex flex-col gap-2.5">
-            {myPurchases.map((p) => <PurchaseCard key={p.id} p={p} remaining={remainingOf(p)} used={usedUnitsByPurchase[p.id] || 0} onDelete={() => deletePurchase(p.id)} />)}
+            {myPurchases.map((p) => {
+              const siblingNames = (p.studentIds || [p.studentId]).filter((sid) => sid !== student.id).map(studentNameOf);
+              return <PurchaseCard key={p.id} p={p} remaining={remainingOf(p)} used={usedUnitsByPurchase[p.id] || 0} sharedWith={siblingNames} onDelete={() => deletePurchase(p.id)} />;
+            })}
           </div>
         )}
       </div>
@@ -763,7 +901,35 @@ function StudentProfile({ student, students, setStudents, purchases, setPurchase
 
       {addingPurchase && (
         <Modal onClose={() => setAddingPurchase(false)} title={`Add package for ${student.name}`} wide>
-          <AddPurchaseForm subjects={subjects} setSubjects={setSubjects} onCancel={() => setAddingPurchase(false)} onSave={(purchase) => { const id = uid(); setPurchases((prev) => [...prev, { ...purchase, id, studentId: student.id }]); setAddingPurchase(false); }} />
+          <AddPurchaseForm
+            students={students}
+            preselectedStudentId={student.id}
+            allowSharing
+            subjects={subjects} setSubjects={setSubjects}
+            availableCredit={availableCredit}
+            onCancel={() => setAddingPurchase(false)}
+            onSave={(purchase, creditApplied) => {
+              const id = uid();
+              setPurchases((prev) => [...prev, { ...purchase, id }]);
+              if (creditApplied && availableCredit) {
+                setRegistrationFees((prev) => prev.map((r) => (r.id === availableCredit.id ? { ...r, creditUsedInPurchaseId: id } : r)));
+              }
+              setAddingPurchase(false);
+            }}
+          />
+        </Modal>
+      )}
+
+      {addingFee && (
+        <Modal onClose={() => setAddingFee(false)} title={`Registration fee — ${student.name}`}>
+          <RegistrationFeeForm
+            onCancel={() => setAddingFee(false)}
+            onSave={(fee) => {
+              const id = uid();
+              setRegistrationFees((prev) => [...prev, { ...fee, id, studentId: student.id }]);
+              setAddingFee(false);
+            }}
+          />
         </Modal>
       )}
 
@@ -783,13 +949,12 @@ function StudentProfile({ student, students, setStudents, purchases, setPurchase
   );
 }
 
-function PurchaseCard({ p, remaining, used, onDelete }) {
+function PurchaseCard({ p, remaining, used, sharedWith, onDelete }) {
   const cfg = TYPE_CONFIG[p.type];
-  const fee = ccFeeOf(p.pricePaid, p.paymentMethod);
-  const total = p.pricePaid + fee;
+  const cc = ccBreakdown(p);
   const bonus = p.bonusUnits || 0;
   const capacity = p.totalUnits + bonus;
-  const discount = p.discount || 0;
+  const discountAmt = p.discountAmount != null ? p.discountAmount : (p.discount || 0);
   const pct = Math.min(100, Math.round((used / capacity) * 100));
   return (
     <div className="card p-4">
@@ -800,9 +965,12 @@ function PurchaseCard({ p, remaining, used, onDelete }) {
             <div className="font-semibold flex items-center gap-1.5" style={{ color: "var(--ink)" }}>
               {p.subject}
               {bonus > 0 && <span className="badge" style={{ background: "var(--amber-tint)", color: "#92651A" }}>+{fmtNum(bonus)} bonus</span>}
-              {discount > 0 && <span className="badge" style={{ background: "var(--coral-tint)", color: "var(--coral)" }}>-{fmtBaht(discount)} off</span>}
+              {discountAmt > 0 && <span className="badge" style={{ background: "var(--coral-tint)", color: "var(--coral)" }}>-{p.discountType === "percent" ? `${fmtNum(p.discountValue)}%` : fmtBaht(discountAmt)} off</span>}
             </div>
-            <div className="text-xs" style={{ color: "var(--ink-soft)" }}>{cfg.label} · purchased {fmtDate(p.purchaseDate)}</div>
+            <div className="text-xs" style={{ color: "var(--ink-soft)" }}>
+              {cfg.label} · purchased {fmtDate(p.purchaseDate)}
+              {sharedWith && sharedWith.length > 0 && <> · shared with {sharedWith.join(", ")}</>}
+            </div>
           </div>
         </div>
         <button className="btn-danger p-1.5 shrink-0" onClick={onDelete} title="Delete this package"><Trash2 size={15} /></button>
@@ -817,10 +985,14 @@ function PurchaseCard({ p, remaining, used, onDelete }) {
         </div>
       </div>
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-3 pt-3 text-xs fmono" style={{ borderTop: "1px solid var(--line)", color: "var(--ink-soft)" }}>
-        <span>Paid {fmtBaht(p.pricePaid)}{discount > 0 ? ` (full ${fmtBaht(p.listPrice != null ? p.listPrice : p.pricePaid)})` : ""}</span>
+        <span>Paid {fmtBaht(p.pricePaid)}{discountAmt > 0 ? ` (full ${fmtBaht(p.listPrice != null ? p.listPrice : p.pricePaid)})` : ""}</span>
         <span>· per {cfg.unitName} {fmtBaht(p.pricePaid / p.totalUnits)}</span>
-        <span className="flex items-center gap-1">{p.paymentMethod === "credit" ? <CreditCard size={12} /> : <Wallet size={12} />} {p.paymentMethod === "credit" ? `Credit card (+3% = ${fmtBaht(fee)})` : "Cash"}</span>
-        {p.paymentMethod === "credit" && <span>· charged total {fmtBaht(total)}</span>}
+        <span className="flex items-center gap-1">{p.paymentMethod === "credit" ? <CreditCard size={12} /> : <Wallet size={12} />} {p.paymentMethod === "credit" ? "Credit card" : "Cash"}</span>
+        {p.paymentMethod === "credit" && (
+          cc.chargeExtra
+            ? <span>· +3% charged to customer ({fmtBaht(cc.customerCharged)} total)</span>
+            : <span>· 3% fee absorbed by school (-{fmtBaht(cc.feeCost)}, net {fmtBaht(cc.netRevenue)})</span>
+        )}
       </div>
     </div>
   );
@@ -859,18 +1031,25 @@ function PurchasesView({ students, purchases, setPurchases, attendance, setAtten
         {sorted.map((p) => {
           const cfg = TYPE_CONFIG[p.type];
           const rem = remainingOf(p);
-          const fee = ccFeeOf(p.pricePaid, p.paymentMethod);
+          const cc = ccBreakdown(p);
+          const ids = p.studentIds || [p.studentId];
           return (
             <div key={p.id} className="card p-4 flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-3 min-w-0">
                 <div className="flex items-center justify-center rounded-lg shrink-0" style={{ width: 38, height: 38, background: "var(--teal-tint)", color: "var(--teal-dark)" }}><TypeIcon type={p.type} size={18} /></div>
                 <div className="min-w-0">
-                  <button className="font-semibold" style={{ color: "var(--ink)", background: "none", border: "none", textAlign: "left" }} onClick={() => { setSelectedStudentId(p.studentId); setTab("students"); }}>{studentName(p.studentId)}</button>
+                  <div className="flex flex-wrap gap-x-1">
+                    {ids.map((sid, i) => (
+                      <button key={sid} className="font-semibold" style={{ color: "var(--ink)", background: "none", border: "none", textAlign: "left" }} onClick={() => { setSelectedStudentId(sid); setTab("students"); }}>
+                        {studentName(sid)}{i < ids.length - 1 ? " &" : ""}
+                      </button>
+                    ))}
+                  </div>
                   <div className="text-xs" style={{ color: "var(--ink-soft)" }}>{p.subject} · {cfg.label}</div>
                 </div>
               </div>
               <div className="flex items-center gap-3 flex-wrap">
-                <span className="text-xs fmono" style={{ color: "var(--ink-soft)" }}>{fmtBaht(p.pricePaid)}{p.paymentMethod === "credit" ? ` +${fmtBaht(fee)}` : ""}</span>
+                <span className="text-xs fmono" style={{ color: "var(--ink-soft)" }}>{fmtBaht(p.pricePaid)}{p.paymentMethod === "credit" && cc.chargeExtra ? ` +${fmtBaht(cc.feeCost)}` : ""}</span>
                 <RemainingBadge remaining={rem} total={p.totalUnits + (p.bonusUnits || 0)} unitName={cfg.unitName} />
                 <button className="btn-danger p-1.5" onClick={() => deletePurchase(p.id)}><Trash2 size={15} /></button>
               </div>
@@ -881,49 +1060,95 @@ function PurchasesView({ students, purchases, setPurchases, attendance, setAtten
 
       {adding && (
         <Modal onClose={() => setAdding(false)} title="Add a new package" wide>
-          <AddPurchaseForm students={students} requireStudentPicker subjects={subjects} setSubjects={setSubjects} onCancel={() => setAdding(false)} onSave={(purchase) => { const id = uid(); setPurchases((prev) => [...prev, { ...purchase, id }]); setAdding(false); }} />
+          <AddPurchaseForm students={students} requireStudentPicker allowSharing subjects={subjects} setSubjects={setSubjects} onCancel={() => setAdding(false)} onSave={(purchase) => { const id = uid(); setPurchases((prev) => [...prev, { ...purchase, id }]); setAdding(false); }} />
         </Modal>
       )}
     </div>
   );
 }
 
-function AddPurchaseForm({ students, requireStudentPicker, subjects, setSubjects, onSave, onCancel }) {
-  const [studentId, setStudentId] = useState(students && students.length === 1 ? students[0].id : "");
+function AddPurchaseForm({ students, requireStudentPicker, preselectedStudentId, allowSharing, subjects, setSubjects, availableCredit, onSave, onCancel }) {
+  const [studentIds, setStudentIds] = useState(preselectedStudentId ? [preselectedStudentId] : (students && students.length === 1 ? [students[0].id] : []));
+  const [addingSibling, setAddingSibling] = useState(false);
   const [subject, setSubject] = useState("");
   const [type, setType] = useState("course");
   const [totalUnits, setTotalUnits] = useState(TYPE_CONFIG.course.defaultUnits);
   const [bonusUnits, setBonusUnits] = useState(0);
   const [price, setPrice] = useState("");
-  const [discount, setDiscount] = useState("");
+  const [discountType, setDiscountType] = useState("amount");
+  const [discountValue, setDiscountValue] = useState("");
+  const [applyCredit, setApplyCredit] = useState(false);
   const [method, setMethod] = useState("cash");
+  const [ccChargeExtra, setCcChargeExtra] = useState(true);
   const [purchaseDate, setPurchaseDate] = useState(todayStr());
 
   useEffect(() => { setTotalUnits(TYPE_CONFIG[type].defaultUnits); }, [type]);
 
   const listPriceNum = Number(price) || 0;
-  const discountNum = Number(discount) || 0;
-  const priceNum = Math.max(0, listPriceNum - discountNum);
-  const fee = ccFeeOf(priceNum, method);
-  const total = priceNum + fee;
+  const discountValueNum = Number(discountValue) || 0;
+  const manualDiscountAmount = discountType === "percent" ? listPriceNum * (discountValueNum / 100) : discountValueNum;
+  const creditAmount = applyCredit && availableCredit ? availableCredit.amount : 0;
+  const totalDiscountAmount = Math.min(listPriceNum, manualDiscountAmount + creditAmount);
+  const priceNum = Math.max(0, listPriceNum - totalDiscountAmount);
+  const cc = ccBreakdown({ pricePaid: priceNum, paymentMethod: method, ccChargeExtra });
   const bonusNum = Number(bonusUnits) || 0;
   const capacity = totalUnits + bonusNum;
   const perUnit = totalUnits > 0 ? priceNum / totalUnits : 0;
-  const canSave = subject && subject.trim() && totalUnits > 0 && listPriceNum > 0 && (!requireStudentPicker || studentId);
+  const canSave = subject && subject.trim() && totalUnits > 0 && listPriceNum > 0 && studentIds.length > 0;
+
   function addSubjectOption(v) {
     setSubjects((prev) => (prev.includes(v) ? prev : [...prev, v]));
   }
+  const availableSiblings = students.filter((s) => !studentIds.includes(s.id));
 
   return (
     <div className="flex flex-col gap-3.5">
-      {requireStudentPicker && (
+      {requireStudentPicker && studentIds.length === 0 && (
         <Field label="Student *">
-          <select className="input w-full px-3 py-2.5 text-sm" value={studentId} onChange={(e) => setStudentId(e.target.value)}>
+          <select className="input w-full px-3 py-2.5 text-sm" value="" onChange={(e) => e.target.value && setStudentIds([e.target.value])}>
             <option value="">Select a student…</option>
             {students.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
         </Field>
       )}
+
+      {studentIds.length > 0 && (
+        <Field label={allowSharing ? "Student(s) — this package's pool of classes" : "Student"}>
+          <div className="flex flex-wrap gap-1.5">
+            {studentIds.map((sid) => {
+              const s = students.find((x) => x.id === sid);
+              return (
+                <span key={sid} className="badge flex items-center gap-1" style={{ background: "var(--teal-tint)", color: "var(--teal-dark)" }}>
+                  {s ? s.name : "—"}
+                  {studentIds.length > 1 && (
+                    <button type="button" onClick={() => setStudentIds((prev) => prev.filter((x) => x !== sid))} style={{ background: "none", border: "none", color: "inherit", cursor: "pointer", padding: 0, display: "flex" }}>
+                      <X size={12} />
+                    </button>
+                  )}
+                </span>
+              );
+            })}
+          </div>
+          {allowSharing && (
+            addingSibling ? (
+              <div className="flex gap-2 mt-2">
+                <select className="input flex-1 px-3 py-2.5 text-sm" onChange={(e) => { if (e.target.value) { setStudentIds((prev) => [...prev, e.target.value]); setAddingSibling(false); } }} defaultValue="">
+                  <option value="">Select sibling…</option>
+                  {availableSiblings.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+                <button type="button" className="btn btn-ghost px-3 py-2.5 text-sm" onClick={() => setAddingSibling(false)}><X size={15} /></button>
+              </div>
+            ) : (
+              availableSiblings.length > 0 && (
+                <button type="button" className="text-xs font-semibold mt-2" style={{ color: "var(--teal-dark)", background: "none", border: "none" }} onClick={() => setAddingSibling(true)}>
+                  + Share this package with a sibling
+                </button>
+              )
+            )
+          )}
+        </Field>
+      )}
+
       <Field label="Subject / course name *">
         <ComboSelect value={subject} onChange={setSubject} options={subjects} onAddOption={addSubjectOption} placeholder="e.g. Math, Coding, Art" />
       </Field>
@@ -947,39 +1172,80 @@ function AddPurchaseForm({ students, requireStudentPicker, subjects, setSubjects
         </div>
       )}
       <Field label="Purchase date"><input type="date" className="input w-full px-3 py-2.5 text-sm fmono" value={purchaseDate} onChange={(e) => setPurchaseDate(e.target.value)} /></Field>
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="Full price (THB) *"><input type="number" min="0" className="input w-full px-3 py-2.5 text-sm fmono" placeholder="0" value={price} onChange={(e) => setPrice(e.target.value)} /></Field>
-        <Field label="Discount (THB, optional)"><input type="number" min="0" className="input w-full px-3 py-2.5 text-sm fmono" placeholder="0" value={discount} onChange={(e) => setDiscount(e.target.value)} /></Field>
-      </div>
+
+      <Field label="Full price (THB) *"><input type="number" min="0" className="input w-full px-3 py-2.5 text-sm fmono" placeholder="0" value={price} onChange={(e) => setPrice(e.target.value)} /></Field>
+
+      <Field label="Discount (optional)">
+        <div className="flex gap-2">
+          <div className="flex rounded-lg overflow-hidden shrink-0" style={{ border: "1px solid var(--line)" }}>
+            <button type="button" onClick={() => setDiscountType("amount")} className="px-3 py-2.5 text-sm font-medium" style={{ background: discountType === "amount" ? "var(--teal)" : "transparent", color: discountType === "amount" ? "white" : "var(--ink)", border: "none" }}>฿</button>
+            <button type="button" onClick={() => setDiscountType("percent")} className="px-3 py-2.5 text-sm font-medium" style={{ background: discountType === "percent" ? "var(--teal)" : "transparent", color: discountType === "percent" ? "white" : "var(--ink)", border: "none" }}>%</button>
+          </div>
+          <input type="number" min="0" className="input flex-1 px-3 py-2.5 text-sm fmono" placeholder="0" value={discountValue} onChange={(e) => setDiscountValue(e.target.value)} />
+        </div>
+      </Field>
+
+      {availableCredit && (
+        <label className="flex items-start gap-2 text-sm card p-3" style={{ background: applyCredit ? "var(--amber-tint)" : "transparent", cursor: "pointer" }}>
+          <input type="checkbox" checked={applyCredit} onChange={(e) => setApplyCredit(e.target.checked)} style={{ marginTop: 2 }} />
+          <span style={{ color: applyCredit ? "#5A4118" : "var(--ink-soft)" }}>
+            Apply registration fee credit ({fmtBaht(availableCredit.amount)}) as a discount on this purchase
+          </span>
+        </label>
+      )}
+
       <Field label="Payment method">
         <div className="grid grid-cols-2 gap-2">
           <button onClick={() => setMethod("cash")} className="flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-medium" style={{ border: method === "cash" ? "2px solid var(--teal)" : "1px solid var(--line)", background: method === "cash" ? "var(--teal-tint)" : "transparent", color: "var(--ink)" }}><Wallet size={16} /> Cash / transfer</button>
-          <button onClick={() => setMethod("credit")} className="flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-medium" style={{ border: method === "credit" ? "2px solid var(--teal)" : "1px solid var(--line)", background: method === "credit" ? "var(--teal-tint)" : "transparent", color: "var(--ink)" }}><CreditCard size={16} /> Credit card (+3%)</button>
+          <button onClick={() => setMethod("credit")} className="flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-sm font-medium" style={{ border: method === "credit" ? "2px solid var(--teal)" : "1px solid var(--line)", background: method === "credit" ? "var(--teal-tint)" : "transparent", color: "var(--ink)" }}><CreditCard size={16} /> Credit card</button>
         </div>
       </Field>
+
+      {method === "credit" && (
+        <Field label="Who covers the 3% card fee?">
+          <div className="grid grid-cols-2 gap-2">
+            <button type="button" onClick={() => setCcChargeExtra(true)} className="flex flex-col items-start px-3 py-2.5 rounded-lg text-left text-sm" style={{ border: ccChargeExtra ? "2px solid var(--teal)" : "1px solid var(--line)", background: ccChargeExtra ? "var(--teal-tint)" : "transparent" }}>
+              <span className="font-medium" style={{ color: "var(--ink)" }}>Customer pays +3%</span>
+              <span className="text-xs" style={{ color: "var(--ink-soft)" }}>Fee passed on, full price counts as revenue</span>
+            </button>
+            <button type="button" onClick={() => setCcChargeExtra(false)} className="flex flex-col items-start px-3 py-2.5 rounded-lg text-left text-sm" style={{ border: !ccChargeExtra ? "2px solid var(--teal)" : "1px solid var(--line)", background: !ccChargeExtra ? "var(--teal-tint)" : "transparent" }}>
+              <span className="font-medium" style={{ color: "var(--ink)" }}>School absorbs 3%</span>
+              <span className="text-xs" style={{ color: "var(--ink-soft)" }}>No extra charge; reduces net revenue</span>
+            </button>
+          </div>
+        </Field>
+      )}
+
       {listPriceNum > 0 && totalUnits > 0 && (
         <div className="card p-3.5 fmono text-xs flex flex-col gap-1" style={{ background: "var(--teal-tint)", border: "none" }}>
-          {discountNum > 0 && (<>
+          {totalDiscountAmount > 0 && (<>
             <div className="flex justify-between"><span>Full price</span><span>{fmtBaht(listPriceNum)}</span></div>
-            <div className="flex justify-between"><span>Discount</span><span>-{fmtBaht(discountNum)}</span></div>
+            {manualDiscountAmount > 0 && <div className="flex justify-between"><span>Discount{discountType === "percent" ? ` (${fmtNum(discountValueNum)}%)` : ""}</span><span>-{fmtBaht(manualDiscountAmount)}</span></div>}
+            {creditAmount > 0 && <div className="flex justify-between"><span>Registration credit</span><span>-{fmtBaht(creditAmount)}</span></div>}
           </>)}
           <div className="flex justify-between"><span>Net price paid</span><span className="font-semibold">{fmtBaht(priceNum)}</span></div>
           <div className="flex justify-between"><span>Price per {TYPE_CONFIG[type].unitName} (paid units)</span><span className="font-semibold">{fmtBaht(perUnit)}</span></div>
           {method === "credit" && (<>
-            <div className="flex justify-between"><span>Credit card fee (3%)</span><span className="font-semibold">{fmtBaht(fee)}</span></div>
-            <div className="flex justify-between" style={{ borderTop: "1px solid rgba(0,0,0,0.08)", paddingTop: 4, marginTop: 2 }}><span>Total charged to customer</span><span className="font-semibold">{fmtBaht(total)}</span></div>
+            <div className="flex justify-between" style={{ borderTop: "1px solid rgba(0,0,0,0.08)", paddingTop: 4, marginTop: 2 }}><span>Card network fee (3%, owed to bank)</span><span className="font-semibold">{fmtBaht(cc.feeCost)}</span></div>
+            {ccChargeExtra ? (
+              <div className="flex justify-between"><span>Total charged to customer</span><span className="font-semibold">{fmtBaht(cc.customerCharged)}</span></div>
+            ) : (
+              <div className="flex justify-between"><span>School's net revenue (fee absorbed)</span><span className="font-semibold">{fmtBaht(cc.netRevenue)}</span></div>
+            )}
           </>)}
         </div>
       )}
+
       <div className="flex justify-end gap-2 pt-1">
         <button className="btn btn-ghost px-4 py-2.5 text-sm" onClick={onCancel}>Cancel</button>
         <button className="btn btn-primary px-5 py-2.5 text-sm" disabled={!canSave} style={{ opacity: canSave ? 1 : 0.45 }}
           onClick={() => onSave({
-            studentId: requireStudentPicker ? studentId : undefined, subject: subject.trim(), type,
+            studentIds, subject: subject.trim(), type,
             totalUnits: Number(totalUnits), bonusUnits: bonusNum,
-            listPrice: listPriceNum, discount: discountNum, pricePaid: priceNum,
-            paymentMethod: method, purchaseDate,
-          })}>
+            listPrice: listPriceNum, discountType, discountValue: discountValueNum, discountAmount: totalDiscountAmount,
+            pricePaid: priceNum, paymentMethod: method, ccChargeExtra: method === "credit" ? ccChargeExtra : undefined,
+            purchaseDate,
+          }, applyCredit)}>
           Save package
         </button>
       </div>
@@ -991,11 +1257,13 @@ function AddPurchaseForm({ students, requireStudentPicker, subjects, setSubjects
    REPORTS VIEW
    ========================================================= */
 
-function ReportsView({ students, purchases, attendance, remainingOf, studentName }) {
-  const totalRevenue = purchases.reduce((sum, p) => sum + p.pricePaid + ccFeeOf(p.pricePaid, p.paymentMethod), 0);
-  const totalFees = purchases.reduce((sum, p) => sum + ccFeeOf(p.pricePaid, p.paymentMethod), 0);
-  const totalDiscounts = purchases.reduce((sum, p) => sum + (p.discount || 0), 0);
+function ReportsView({ students, purchases, attendance, remainingOf, studentName, registrationFees }) {
+  const totalRevenue = purchases.reduce((sum, p) => sum + ccBreakdown(p).netRevenue, 0);
+  const totalFeesCost = purchases.reduce((sum, p) => sum + ccBreakdown(p).feeCost, 0);
+  const totalFeesAbsorbed = purchases.reduce((sum, p) => { const cc = ccBreakdown(p); return sum + (cc.chargeExtra ? 0 : cc.feeCost); }, 0);
+  const totalDiscounts = purchases.reduce((sum, p) => sum + (p.discountAmount != null ? p.discountAmount : (p.discount || 0)), 0);
   const totalBonusUnits = purchases.reduce((sum, p) => sum + (p.bonusUnits || 0), 0);
+  const totalRegFees = (registrationFees || []).reduce((sum, r) => sum + (r.status === "waived" ? 0 : r.amount), 0);
   const noShowCount = attendance.filter((a) => a.attended === false).length;
   const thisMonth = todayStr().slice(0, 7);
   const attendanceThisMonth = attendance.filter((a) => a.date.slice(0, 7) === thisMonth).length;
@@ -1003,7 +1271,7 @@ function ReportsView({ students, purchases, attendance, remainingOf, studentName
   const lowBalance = purchases.map((p) => ({ p, rem: remainingOf(p) })).filter(({ p, rem }) => rem > 0 && rem <= Math.max(1, Math.round((p.totalUnits + (p.bonusUnits || 0)) * 0.2))).sort((a, b) => a.rem - b.rem);
 
   const bySubject = {};
-  purchases.forEach((p) => { bySubject[p.subject] = (bySubject[p.subject] || 0) + p.pricePaid + ccFeeOf(p.pricePaid, p.paymentMethod); });
+  purchases.forEach((p) => { bySubject[p.subject] = (bySubject[p.subject] || 0) + ccBreakdown(p).netRevenue; });
   const subjectRows = Object.entries(bySubject).sort((a, b) => b[1] - a[1]);
   const maxSubject = subjectRows.length ? subjectRows[0][1] : 1;
 
@@ -1026,8 +1294,10 @@ function ReportsView({ students, purchases, attendance, remainingOf, studentName
       <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(180px,1fr))" }}>
         <StatCard label="Total students" value={students.length.toString()} icon={Users} />
         <StatCard label="Total packages" value={purchases.length.toString()} icon={BookOpenCheck} />
-        <StatCard label="Total revenue" value={fmtBaht(totalRevenue)} icon={Wallet} />
-        <StatCard label="Total card fees" value={fmtBaht(totalFees)} icon={CreditCard} />
+        <StatCard label="Net course revenue" value={fmtBaht(totalRevenue)} icon={Wallet} />
+        <StatCard label="Registration fees collected" value={fmtBaht(totalRegFees)} icon={Wallet} />
+        <StatCard label="Card fees owed to bank" value={fmtBaht(totalFeesCost)} icon={CreditCard} />
+        <StatCard label="Card fees absorbed by school" value={fmtBaht(totalFeesAbsorbed)} icon={CreditCard} />
         <StatCard label="Total discounts given" value={fmtBaht(totalDiscounts)} icon={Wallet} />
         <StatCard label="Bonus classes given" value={fmtNum(totalBonusUnits)} icon={BookOpenCheck} />
         <StatCard label="Charged absences" value={noShowCount.toString()} icon={AlertCircle} />
@@ -1037,7 +1307,7 @@ function ReportsView({ students, purchases, attendance, remainingOf, studentName
         <div className="fdisplay" style={{ fontSize: 30, fontWeight: 700, color: "var(--teal-dark)" }}>{attendanceThisMonth} <span className="text-base fmono" style={{ color: "var(--ink-soft)", fontWeight: 400 }}>sessions</span></div>
       </div>
       <div>
-        <SectionTitle>Revenue by subject</SectionTitle>
+        <SectionTitle>Net revenue by subject</SectionTitle>
         {subjectRows.length === 0 ? <div className="text-sm" style={{ color: "var(--ink-soft)" }}>No data yet</div> : (
           <div className="card p-4 flex flex-col gap-3">
             {subjectRows.map(([subj, amt]) => (
@@ -1121,20 +1391,26 @@ function StatCard({ label, value, icon: Icon }) {
    as a real website, not inside Claude's sandboxed preview)
    ========================================================= */
 
-function buildWorkbook({ students, purchases, attendance, usedUnitsByPurchase, remainingOf, studentName }) {
+function buildWorkbook({ students, purchases, attendance, usedUnitsByPurchase, remainingOf, studentName, registrationFees }) {
   const wb = XLSX.utils.book_new();
   const studentRows = students.map((s) => ({ ID: s.id, Name: s.name, Phone: s.phone || "", Note: s.note || "" }));
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(studentRows), "Students");
 
   const purchaseRows = purchases.map((p) => {
     const cfg = TYPE_CONFIG[p.type];
-    const fee = ccFeeOf(p.pricePaid, p.paymentMethod);
+    const cc = ccBreakdown(p);
     const used = usedUnitsByPurchase[p.id] || 0;
+    const names = (p.studentIds || [p.studentId]).map(studentName).join(" & ");
+    const discountAmt = p.discountAmount != null ? p.discountAmount : (p.discount || 0);
     return {
-      ID: p.id, Student: studentName(p.studentId), Subject: p.subject, Type: cfg.label,
-      "Total Units": p.totalUnits, Unit: cfg.unitName, "Price Paid (THB)": p.pricePaid,
-      "Payment Method": p.paymentMethod === "credit" ? "Credit card" : "Cash",
-      "CC Fee 3% (THB)": Math.round(fee), "Total Collected (THB)": Math.round(p.pricePaid + fee),
+      ID: p.id, Student: names, Subject: p.subject, Type: cfg.label,
+      "Total Units": p.totalUnits, "Bonus Units": p.bonusUnits || 0, Unit: cfg.unitName,
+      "List Price (THB)": p.listPrice != null ? p.listPrice : p.pricePaid,
+      "Discount Type": p.discountType || "amount", "Discount Value": p.discountValue || 0, "Discount Amount (THB)": Math.round(discountAmt),
+      "Price Paid (THB)": p.pricePaid, "Payment Method": p.paymentMethod === "credit" ? "Credit card" : "Cash",
+      "CC Fee Owed to Bank (THB)": Math.round(cc.feeCost),
+      "CC Charged to Customer?": p.paymentMethod === "credit" ? (cc.chargeExtra ? "Yes" : "No, absorbed") : "",
+      "Customer Charged (THB)": Math.round(cc.customerCharged), "School Net Revenue (THB)": Math.round(cc.netRevenue),
       "Price / Unit (THB)": Math.round((p.pricePaid / p.totalUnits) * 100) / 100,
       "Purchase Date": p.purchaseDate, Used: used, Remaining: remainingOf(p),
     };
@@ -1146,6 +1422,15 @@ function buildWorkbook({ students, purchases, attendance, usedUnitsByPurchase, r
     return { Date: a.date, Student: studentName(a.studentId), Subject: p?.subject || "", "Units Used": a.unitsUsed, Unit: p ? TYPE_CONFIG[p.type].unitName : "", Teacher: a.teacher || "", Status: a.attended === false ? "Charged, absent" : "Attended", Note: a.note || "" };
   });
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(attendanceRows), "Attendance");
+
+  if (registrationFees && registrationFees.length) {
+    const feeRows = registrationFees.slice().sort((a, b) => (a.date || "").localeCompare(b.date || "")).map((r) => ({
+      Student: studentName(r.studentId), "Amount (THB)": r.amount,
+      Status: r.status === "waived" ? "Waived" : r.status === "credit" ? (r.creditUsedInPurchaseId ? "Credit used" : "Credit available") : "Collected",
+      Date: r.date, Note: r.note || "",
+    }));
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(feeRows), "Registration Fees");
+  }
 
   const byTeacher = {};
   attendance.forEach((a) => {
@@ -1162,7 +1447,7 @@ function buildWorkbook({ students, purchases, attendance, usedUnitsByPurchase, r
   return wb;
 }
 
-function BackupView({ students, purchases, attendance, usedUnitsByPurchase, remainingOf, studentName, sheetUrl, setSheetUrl, autoSync, setAutoSync, lastSynced, doSync }) {
+function BackupView({ students, purchases, attendance, usedUnitsByPurchase, remainingOf, studentName, registrationFees, sheetUrl, setSheetUrl, autoSync, setAutoSync, lastSynced, doSync }) {
   const [justDownloaded, setJustDownloaded] = useState(false);
   const [draftUrl, setDraftUrl] = useState(sheetUrl);
   const [syncing, setSyncing] = useState(false);
@@ -1172,7 +1457,7 @@ function BackupView({ students, purchases, attendance, usedUnitsByPurchase, rema
   useEffect(() => setDraftUrl(sheetUrl), [sheetUrl]);
 
   function handleDownload() {
-    const wb = buildWorkbook({ students, purchases, attendance, usedUnitsByPurchase, remainingOf, studentName });
+    const wb = buildWorkbook({ students, purchases, attendance, usedUnitsByPurchase, remainingOf, studentName, registrationFees });
     XLSX.writeFile(wb, `school-data-${todayStr()}.xlsx`);
     setJustDownloaded(true);
     setTimeout(() => setJustDownloaded(false), 2500);
