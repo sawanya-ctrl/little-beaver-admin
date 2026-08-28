@@ -206,11 +206,13 @@ function ccBreakdown(p) {
   };
 }
 
-// Price per unit should reflect what the school actually nets per class —
-// discounts and any card fee the school absorbs both come off before dividing.
+// Price per class should spread the net revenue across every class actually
+// delivered — paid classes AND any bonus/free classes given with the package.
+// e.g. 8 paid + 1 bonus at ฿12,600 → ฿12,600 / 9 per class, not / 8.
 function netPricePerUnit(p) {
-  if (!p.totalUnits) return 0;
-  return ccBreakdown(p).netRevenue / p.totalUnits;
+  const capacity = (p.totalUnits || 0) + (p.bonusUnits || 0);
+  if (!capacity) return 0;
+  return ccBreakdown(p).netRevenue / capacity;
 }
 function describeFeeStatus(r) {
   if (!r) return "";
@@ -1113,6 +1115,7 @@ function StudentProfile({ student, students, setStudents, purchases, setPurchase
         <Modal onClose={() => setAddingPurchase(false)} title={`Add package for ${student.name}`} wide>
           <AddPurchaseForm
             students={students}
+            purchases={purchases}
             preselectedStudentId={student.id}
             allowSharing
             subjects={subjects} setSubjects={setSubjects}
@@ -1152,6 +1155,7 @@ function StudentProfile({ student, students, setStudents, purchases, setPurchase
         <Modal onClose={() => setEditingPurchase(null)} title={`Edit package — ${editingPurchase.subject}`} wide>
           <AddPurchaseForm
             students={students}
+            purchases={purchases}
             allowSharing
             subjects={subjects} setSubjects={setSubjects}
             initial={editingPurchase}
@@ -1174,22 +1178,6 @@ function StudentProfile({ student, students, setStudents, purchases, setPurchase
             onSave={(fields) => {
               updateAttendance(editingAttendance.id, fields);
               setEditingAttendance(null);
-            }}
-          />
-        </Modal>
-      )}
-
-      {editingPurchase && (
-        <Modal onClose={() => setEditingPurchase(null)} title={`Edit package — ${editingPurchase.subject}`} wide>
-          <AddPurchaseForm
-            students={students}
-            allowSharing
-            subjects={subjects} setSubjects={setSubjects}
-            initial={editingPurchase}
-            onCancel={() => setEditingPurchase(null)}
-            onSave={(fields) => {
-              updatePurchase(editingPurchase.id, fields);
-              setEditingPurchase(null);
             }}
           />
         </Modal>
@@ -1346,7 +1334,7 @@ function PurchasesView({ students, purchases, setPurchases, attendance, setAtten
       {adding && (
         <Modal onClose={() => setAdding(false)} title="Add a new package" wide>
           <AddPurchaseForm
-            students={students} requireStudentPicker allowSharing subjects={subjects} setSubjects={setSubjects}
+            students={students} purchases={purchases} requireStudentPicker allowSharing subjects={subjects} setSubjects={setSubjects}
             onCancel={() => setAdding(false)}
             onSave={(purchase, creditApplied, feeInfo) => {
               const id = uid();
@@ -1364,7 +1352,7 @@ function PurchasesView({ students, purchases, setPurchases, attendance, setAtten
       {editingPurchase && (
         <Modal onClose={() => setEditingPurchase(null)} title={`Edit package — ${editingPurchase.subject}`} wide>
           <AddPurchaseForm
-            students={students} allowSharing subjects={subjects} setSubjects={setSubjects}
+            students={students} purchases={purchases} allowSharing subjects={subjects} setSubjects={setSubjects}
             initial={editingPurchase}
             onCancel={() => setEditingPurchase(null)}
             onSave={(fields) => { updatePurchase(editingPurchase.id, fields); setEditingPurchase(null); }}
@@ -1375,7 +1363,7 @@ function PurchasesView({ students, purchases, setPurchases, attendance, setAtten
   );
 }
 
-function AddPurchaseForm({ students, requireStudentPicker, preselectedStudentId, allowSharing, subjects, setSubjects, availableCredit, existingFeeStatus, initial, onSave, onCancel }) {
+function AddPurchaseForm({ students, purchases, requireStudentPicker, preselectedStudentId, allowSharing, subjects, setSubjects, availableCredit, existingFeeStatus, initial, onSave, onCancel }) {
   const [studentIds, setStudentIds] = useState(initial ? (initial.studentIds || [initial.studentId]) : (preselectedStudentId ? [preselectedStudentId] : (students && students.length === 1 ? [students[0].id] : [])));
   const [addingSibling, setAddingSibling] = useState(false);
   const [subject, setSubject] = useState(initial ? initial.subject : "");
@@ -1403,8 +1391,25 @@ function AddPurchaseForm({ students, requireStudentPicker, preselectedStudentId,
   const cc = ccBreakdown({ pricePaid: priceNum, paymentMethod: method, ccChargeExtra });
   const bonusNum = Number(bonusUnits) || 0;
   const capacity = totalUnits + bonusNum;
-  const perUnit = totalUnits > 0 ? cc.netRevenue / totalUnits : 0;
+  const perUnit = capacity > 0 ? cc.netRevenue / capacity : 0;
   const canSave = subject && subject.trim() && totalUnits > 0 && listPriceNum > 0 && studentIds.length > 0;
+
+  const commonQuantities = useMemo(() => {
+    const counts = {};
+    (purchases || []).filter((p) => p.type === type).forEach((p) => { counts[p.totalUnits] = (counts[p.totalUnits] || 0) + 1; });
+    const seeds = type === "course" ? [8, 16, 24] : [];
+    const byFrequency = Object.keys(counts).map(Number).sort((a, b) => counts[b] - counts[a]).slice(0, 4);
+    return Array.from(new Set([...byFrequency, ...seeds])).sort((a, b) => a - b).slice(0, 6);
+  }, [purchases, type]);
+
+  const priceHistory = useMemo(() => {
+    if (!subject || !totalUnits) return [];
+    const counts = {};
+    (purchases || [])
+      .filter((p) => p.subject === subject && p.type === type && p.totalUnits === Number(totalUnits))
+      .forEach((p) => { const lp = p.listPrice != null ? p.listPrice : p.pricePaid; counts[lp] = (counts[lp] || 0) + 1; });
+    return Object.keys(counts).map(Number).sort((a, b) => counts[b] - counts[a]).slice(0, 4);
+  }, [purchases, subject, type, totalUnits]);
 
   function addSubjectOption(v) {
     setSubjects((prev) => (prev.includes(v) ? prev : [...prev, v]));
@@ -1473,7 +1478,16 @@ function AddPurchaseForm({ students, requireStudentPicker, preselectedStudentId,
         </div>
       </Field>
       <div className="grid grid-cols-2 gap-3">
-        <Field label={`Paid quantity (${TYPE_CONFIG[type].unitName}s) *`}><input type="number" min="1" step="0.5" className="input w-full px-3 py-2.5 text-sm fmono" value={totalUnits} onChange={(e) => setTotalUnits(Number(e.target.value))} /></Field>
+        <Field label={`Paid quantity (${TYPE_CONFIG[type].unitName}s) *`}>
+          <input type="number" min="1" step="0.5" className="input w-full px-3 py-2.5 text-sm fmono" value={totalUnits} onChange={(e) => setTotalUnits(Number(e.target.value))} />
+          {commonQuantities.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 mt-1.5">
+              {commonQuantities.map((q) => (
+                <button type="button" key={q} onClick={() => setTotalUnits(q)} className="badge fmono" style={{ background: totalUnits === q ? "var(--teal)" : "var(--teal-tint)", color: totalUnits === q ? "white" : "var(--teal-dark)", border: "none", cursor: "pointer" }}>{fmtNum(q)}</button>
+              ))}
+            </div>
+          )}
+        </Field>
         <Field label={`Bonus ${TYPE_CONFIG[type].unitName}s (free, optional)`}><input type="number" min="0" step="0.5" className="input w-full px-3 py-2.5 text-sm fmono" placeholder="0" value={bonusUnits} onChange={(e) => setBonusUnits(e.target.value)} /></Field>
       </div>
       {bonusNum > 0 && (
@@ -1483,7 +1497,17 @@ function AddPurchaseForm({ students, requireStudentPicker, preselectedStudentId,
       )}
       <Field label="Purchase date"><input type="date" className="input w-full px-3 py-2.5 text-sm fmono" value={purchaseDate} onChange={(e) => setPurchaseDate(e.target.value)} /></Field>
 
-      <Field label="Full price (THB) *"><input type="number" min="0" className="input w-full px-3 py-2.5 text-sm fmono" placeholder="0" value={price} onChange={(e) => setPrice(e.target.value)} /></Field>
+      <Field label="Full price (THB) *">
+        <input type="number" min="0" className="input w-full px-3 py-2.5 text-sm fmono" placeholder="0" value={price} onChange={(e) => setPrice(e.target.value)} />
+        {priceHistory.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
+            <span className="text-xs" style={{ color: "var(--ink-soft)" }}>Used before for {subject} × {fmtNum(totalUnits)}:</span>
+            {priceHistory.map((pr) => (
+              <button type="button" key={pr} onClick={() => setPrice(String(pr))} className="badge fmono" style={{ background: "var(--amber-tint)", color: "#92651A", border: "none", cursor: "pointer" }}>{fmtBaht(pr)}</button>
+            ))}
+          </div>
+        )}
+      </Field>
 
       <Field label="Discount (optional)">
         <div className="flex gap-2">
@@ -1534,7 +1558,7 @@ function AddPurchaseForm({ students, requireStudentPicker, preselectedStudentId,
             {creditAmount > 0 && <div className="flex justify-between"><span>Registration credit</span><span>-{fmtBaht(creditAmount)}</span></div>}
           </>)}
           <div className="flex justify-between"><span>Net price paid</span><span className="font-semibold">{fmtBaht(priceNum)}</span></div>
-          <div className="flex justify-between"><span>Price per {TYPE_CONFIG[type].unitName} (paid units)</span><span className="font-semibold">{fmtBaht(perUnit)}</span></div>
+          <div className="flex justify-between"><span>Price per {TYPE_CONFIG[type].unitName}{bonusNum > 0 ? ` (spread over ${fmtNum(capacity)} incl. bonus)` : ""}</span><span className="font-semibold">{fmtBaht(perUnit)}</span></div>
           {method === "credit" && (<>
             <div className="flex justify-between" style={{ borderTop: "1px solid rgba(0,0,0,0.08)", paddingTop: 4, marginTop: 2 }}><span>Card network fee (3%, owed to bank)</span><span className="font-semibold">{fmtBaht(cc.feeCost)}</span></div>
             {ccChargeExtra ? (
@@ -1634,6 +1658,19 @@ function ReportsView({ students, purchases, attendance, remainingOf, studentName
   const totalFeesAbsorbed = fPurchases.reduce((sum, p) => { const cc = ccBreakdown(p); return sum + (cc.chargeExtra ? 0 : cc.feeCost); }, 0);
   const totalDiscounts = fPurchases.reduce((sum, p) => sum + (p.discountAmount != null ? p.discountAmount : (p.discount || 0)), 0);
   const totalBonusUnits = fPurchases.reduce((sum, p) => sum + (p.bonusUnits || 0), 0);
+
+  // Active = checked in (any status) within the last 3 months, regardless of the report period selected above.
+  const activityCutoff = (() => {
+    const d = new Date();
+    d.setMonth(d.getMonth() - 3);
+    return d.toISOString().slice(0, 10);
+  })();
+  const lastSeenByStudent = {};
+  attendance.forEach((a) => {
+    if (!lastSeenByStudent[a.studentId] || a.date > lastSeenByStudent[a.studentId]) lastSeenByStudent[a.studentId] = a.date;
+  });
+  const activeStudentCount = students.filter((s) => lastSeenByStudent[s.id] && lastSeenByStudent[s.id] >= activityCutoff).length;
+  const nonActiveStudentCount = students.length - activeStudentCount;
   const totalRegFees = (registrationFees || []).filter((r) => inRange(r.date)).reduce((sum, r) => sum + (r.status === "waived" ? 0 : r.amount), 0);
   const noShowCount = fAttendance.filter((a) => a.attended === false).length;
   const checkinsInPeriod = fAttendance.filter((a) => a.purchaseId !== PENDING_PURCHASE_ID).length;
@@ -1712,7 +1749,8 @@ function ReportsView({ students, purchases, attendance, remainingOf, studentName
       )}
 
       <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(180px,1fr))" }}>
-        <StatCard label="Total students" value={students.length.toString()} icon={Users} />
+        <StatCard label="Active students" value={activeStudentCount.toString()} icon={Users} />
+        <StatCard label="Non-active students (3mo+)" value={nonActiveStudentCount.toString()} icon={Users} />
         <StatCard label="Packages purchased" value={fPurchases.length.toString()} icon={BookOpenCheck} />
         <StatCard label="Net course revenue" value={fmtBaht(totalRevenue)} icon={Wallet} />
         <StatCard label="Registration fees collected" value={fmtBaht(totalRegFees)} icon={Wallet} />
