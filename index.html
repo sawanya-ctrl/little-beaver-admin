@@ -163,6 +163,16 @@ function storageSet(key, value) {
   }
 }
 
+// Pulls the full raw data snapshot back from the connected Google Sheet.
+// Used both for the manual "restore" button and automatically on load
+// for a device that doesn't have any local data yet.
+async function restoreFromSheet(url) {
+  const res = await fetch(url);
+  const data = await res.json();
+  if (!data || (!data.students && !data.purchases)) throw new Error("empty backup");
+  return data;
+}
+
 /* ---------- helpers ---------- */
 
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -227,28 +237,70 @@ function App() {
   const loadedRef = useRef(false);
 
   useEffect(() => {
-    const res = storageGet(STORAGE_KEY);
-    if (res && res.value) {
+    (async () => {
+      const res = storageGet(STORAGE_KEY);
+      let data = {};
+      if (res && res.value) {
+        try { data = JSON.parse(res.value); } catch (e) {}
+      }
+      let urlSheet = "";
       try {
-        const data = JSON.parse(res.value);
-        setStudents(data.students || []);
-        setPurchases(data.purchases || []);
-        setAttendance(data.attendance || []);
-        // merge saved lists with any values already used in past data (migration-safe)
-        const subjSet = new Set(data.subjects || []);
-        (data.purchases || []).forEach((p) => p.subject && subjSet.add(p.subject));
-        setSubjects(Array.from(subjSet));
-        const teachSet = new Set(data.teachers || []);
-        (data.attendance || []).forEach((a) => a.teacher && teachSet.add(a.teacher));
-        setTeachers(Array.from(teachSet));
-        setRegistrationFees(data.registrationFees || []);
-        setSheetUrl(data.sheetUrl || "");
-        setAutoSync(!!data.autoSync);
-        setLastSynced(data.lastSynced || null);
+        urlSheet = new URLSearchParams(window.location.search).get("sheet") || "";
       } catch (e) {}
-    }
-    loadedRef.current = true;
-    setLoading(false);
+      const effectiveSheetUrl = data.sheetUrl || urlSheet || "";
+
+      let finalStudents = data.students || [];
+      let finalPurchases = data.purchases || [];
+      let finalAttendance = data.attendance || [];
+      let finalSubjects = data.subjects || [];
+      let finalTeachers = data.teachers || [];
+      let finalFees = data.registrationFees || [];
+
+      // Brand-new / empty device that already knows the sheet (via saved URL or a shared link)
+      // pulls the existing data automatically — no manual restore button needed.
+      const isEmpty = finalStudents.length === 0;
+      if (isEmpty && effectiveSheetUrl) {
+        try {
+          const remote = await restoreFromSheet(effectiveSheetUrl);
+          if (remote.students && remote.students.length) {
+            finalStudents = remote.students || [];
+            finalPurchases = remote.purchases || [];
+            finalAttendance = remote.attendance || [];
+            finalSubjects = remote.subjects || [];
+            finalTeachers = remote.teachers || [];
+            finalFees = remote.registrationFees || [];
+          }
+        } catch (e) {
+          // no network / sheet not reachable yet — fall back to manual restore in the Backup tab
+        }
+      }
+
+      const subjSet = new Set(finalSubjects);
+      finalPurchases.forEach((p) => p.subject && subjSet.add(p.subject));
+      const teachSet = new Set(finalTeachers);
+      finalAttendance.forEach((a) => a.teacher && teachSet.add(a.teacher));
+
+      const finalAutoSync = data.autoSync !== undefined ? !!data.autoSync : !!effectiveSheetUrl;
+
+      setStudents(finalStudents);
+      setPurchases(finalPurchases);
+      setAttendance(finalAttendance);
+      setSubjects(Array.from(subjSet));
+      setTeachers(Array.from(teachSet));
+      setRegistrationFees(finalFees);
+      setSheetUrl(effectiveSheetUrl);
+      setAutoSync(finalAutoSync);
+      setLastSynced(data.lastSynced || null);
+
+      storageSet(STORAGE_KEY, JSON.stringify({
+        students: finalStudents, purchases: finalPurchases, attendance: finalAttendance,
+        subjects: Array.from(subjSet), teachers: Array.from(teachSet), registrationFees: finalFees,
+        sheetUrl: effectiveSheetUrl, autoSync: finalAutoSync, lastSynced: data.lastSynced || null,
+      }));
+
+      loadedRef.current = true;
+      setLoading(false);
+    })();
   }, []);
 
   useEffect(() => {
@@ -1843,6 +1895,7 @@ function BackupView({ students, setStudents, purchases, setPurchases, attendance
   const [showPasteRestore, setShowPasteRestore] = useState(false);
   const [pasteText, setPasteText] = useState("");
   const [restoredOk, setRestoredOk] = useState(false);
+  const [linkCopied, setLinkCopied] = useState(false);
 
   useEffect(() => setDraftUrl(sheetUrl), [sheetUrl]);
 
@@ -1885,9 +1938,7 @@ function BackupView({ students, setStudents, purchases, setPurchases, attendance
     setRestoring(true);
     setRestoreError("");
     try {
-      const res = await fetch(sheetUrl);
-      const data = await res.json();
-      if (!data || (!data.students && !data.purchases)) throw new Error("empty");
+      const data = await restoreFromSheet(sheetUrl);
       applyRestoredData(data);
     } catch (e) {
       setRestoreError("Automatic restore didn't work (this can happen due to browser cross-origin restrictions). Use \"Open backup link\" below instead — it always works.");
@@ -1945,6 +1996,22 @@ function BackupView({ students, setStudents, purchases, setPurchases, attendance
             </label>
           </div>
           <div className="text-xs fmono" style={{ color: "var(--ink-soft)" }}>{sheetUrl ? `Connected · last synced ${fmtDateTime(lastSynced)}` : "Not connected yet"}</div>
+
+          {sheetUrl && (
+            <div className="card p-3.5" style={{ background: "var(--teal-tint)", border: "none" }}>
+              <div className="text-xs font-semibold mb-1" style={{ color: "var(--teal-dark)" }}>Use this link on every device</div>
+              <div className="text-xs" style={{ color: "var(--ink-soft)" }}>
+                Bookmark this exact link (not the plain one) on your other computers/phones. Any device that opens it already knows which sheet to use — new data pulls in automatically, no setup needed there.
+              </div>
+              <div className="flex gap-2 mt-2">
+                <input readOnly className="input flex-1 px-3 py-2 text-xs fmono" value={typeof window !== "undefined" ? `${window.location.origin}${window.location.pathname}?sheet=${encodeURIComponent(sheetUrl)}` : ""} onClick={(e) => e.target.select()} />
+                <button className="btn btn-primary flex items-center gap-1 px-3 py-2 text-xs shrink-0" onClick={async () => {
+                  const link = `${window.location.origin}${window.location.pathname}?sheet=${encodeURIComponent(sheetUrl)}`;
+                  try { await navigator.clipboard.writeText(link); setLinkCopied(true); setTimeout(() => setLinkCopied(false), 1800); } catch (e) {}
+                }}>{linkCopied ? <Check size={13} /> : <Copy size={13} />} {linkCopied ? "Copied" : "Copy"}</button>
+              </div>
+            </div>
+          )}
 
           {confirmEmptySync && (
             <div className="card p-4 flex flex-col gap-2.5" style={{ background: "var(--coral-tint)", border: "none" }}>
