@@ -279,15 +279,30 @@ function App() {
       }
 
       // Already has local data — don't overwrite silently, but check in the
-      // background whether the sheet has a different student count and
-      // surface a banner so mismatches (like syncing from the wrong device)
-      // get noticed immediately instead of being discovered days later.
+      // background whether the sheet has different students, packages, or
+      // check-ins than this device, and surface a banner. Checking all three
+      // counts (not just students) catches far more real-world edits — e.g.
+      // adding a package or a check-in on another device without adding a
+      // new student wouldn't change the student count at all.
       if (!isEmpty && effectiveSheetUrl) {
         restoreFromSheet(effectiveSheetUrl)
           .then((remote) => {
-            const remoteCount = (remote.students || []).length;
-            if (remoteCount !== finalStudents.length) {
-              setRemoteMismatch({ remoteCount, localCount: finalStudents.length });
+            const remoteCounts = {
+              students: (remote.students || []).length,
+              purchases: (remote.purchases || []).length,
+              attendance: (remote.attendance || []).length,
+            };
+            const localCounts = {
+              students: finalStudents.length,
+              purchases: finalPurchases.length,
+              attendance: finalAttendance.length,
+            };
+            if (
+              remoteCounts.students !== localCounts.students ||
+              remoteCounts.purchases !== localCounts.purchases ||
+              remoteCounts.attendance !== localCounts.attendance
+            ) {
+              setRemoteMismatch({ remote: remoteCounts, local: localCounts });
             }
           })
           .catch(() => {});
@@ -457,8 +472,10 @@ function App() {
             <div className="text-sm flex items-start gap-2" style={{ color: "#5A4118" }}>
               <AlertCircle size={17} className="shrink-0 mt-0.5" />
               <span>
-                This device shows <strong>{remoteMismatch.localCount}</strong> students, but the connected Google Sheet has <strong>{remoteMismatch.remoteCount}</strong>.
-                One of them is out of date — check which device has the data you expect before deciding.
+                This device doesn't match the connected Google Sheet.
+                {" "}This device: <strong>{remoteMismatch.local.students} students, {remoteMismatch.local.purchases} packages, {remoteMismatch.local.attendance} check-ins</strong>.
+                {" "}Sheet: <strong>{remoteMismatch.remote.students} students, {remoteMismatch.remote.purchases} packages, {remoteMismatch.remote.attendance} check-ins</strong>.
+                {" "}One of them is out of date — check which one has the data you expect before deciding.
               </span>
             </div>
             <div className="flex gap-2 shrink-0">
