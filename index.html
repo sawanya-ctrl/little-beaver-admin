@@ -234,6 +234,8 @@ function App() {
   const [sheetUrl, setSheetUrl] = useState("");
   const [autoSync, setAutoSync] = useState(false);
   const [lastSynced, setLastSynced] = useState(null);
+  const [syncedSnapshot, setSyncedSnapshot] = useState(null);
+  const dirtyRef = useRef(false);
   const [remoteMismatch, setRemoteMismatch] = useState(null);
   const [tab, setTab] = useState("checkin");
   const [selectedStudentId, setSelectedStudentId] = useState(null);
@@ -252,6 +254,8 @@ function App() {
       } catch (e) {}
       const effectiveSheetUrl = data.sheetUrl || urlSheet || "";
 
+      let finalSyncedSnapshot = data.syncedSnapshot || null;
+      let pulledFromRemote = false;
       let finalStudents = data.students || [];
       let finalPurchases = data.purchases || [];
       let finalAttendance = data.attendance || [];
@@ -272,19 +276,44 @@ function App() {
             finalSubjects = remote.subjects || [];
             finalTeachers = remote.teachers || [];
             finalFees = remote.registrationFees || [];
+            pulledFromRemote = true;
           }
         } catch (e) {
           // no network / sheet not reachable yet — fall back to manual restore in the Backup tab
         }
       }
 
-      // Already has local data — don't overwrite silently, but check in the
-      // background whether the sheet has different students, packages, or
-      // check-ins than this device, and surface a banner. Checking all three
-      // counts (not just students) catches far more real-world edits — e.g.
-      // adding a package or a check-in on another device without adding a
-      // new student wouldn't change the student count at all.
-      if (!isEmpty && effectiveSheetUrl) {
+      // Already has local data. If this device's data exactly matches what it
+      // last successfully synced (i.e. nothing changed locally since — the
+      // common case of just reopening the app), it's provably safe to pull
+      // the sheet's latest version automatically: nothing local is at risk of
+      // being lost, since it's all already reflected in the sheet. Only when
+      // local looks "dirty" (edited since the last sync, e.g. autoSync was
+      // off or a push failed) do we hold back and just show a banner.
+      const snapshot = data.syncedSnapshot;
+      const looksSynced = !!snapshot &&
+        snapshot.students === finalStudents.length &&
+        snapshot.purchases === finalPurchases.length &&
+        snapshot.attendance === finalAttendance.length;
+
+      if (!isEmpty && effectiveSheetUrl && looksSynced) {
+        try {
+          const remote = await restoreFromSheet(effectiveSheetUrl);
+          if (remote.students && remote.students.length) {
+            finalStudents = remote.students || [];
+            finalPurchases = remote.purchases || [];
+            finalAttendance = remote.attendance || [];
+            finalSubjects = remote.subjects || [];
+            finalTeachers = remote.teachers || [];
+            finalFees = remote.registrationFees || [];
+            pulledFromRemote = true;
+          }
+        } catch (e) {
+          // couldn't reach the sheet — just continue with local data as-is
+        }
+      } else if (!isEmpty && effectiveSheetUrl) {
+        // Local has unsynced changes (or we can't tell) — check in the
+        // background and surface a banner instead of overwriting silently.
         restoreFromSheet(effectiveSheetUrl)
           .then((remote) => {
             const remoteCounts = {
@@ -315,6 +344,10 @@ function App() {
 
       const finalAutoSync = data.autoSync !== undefined ? !!data.autoSync : !!effectiveSheetUrl;
 
+      if (pulledFromRemote) {
+        finalSyncedSnapshot = { students: finalStudents.length, purchases: finalPurchases.length, attendance: finalAttendance.length };
+      }
+
       setStudents(finalStudents);
       setPurchases(finalPurchases);
       setAttendance(finalAttendance);
@@ -324,11 +357,13 @@ function App() {
       setSheetUrl(effectiveSheetUrl);
       setAutoSync(finalAutoSync);
       setLastSynced(data.lastSynced || null);
+      setSyncedSnapshot(finalSyncedSnapshot);
 
       storageSet(STORAGE_KEY, JSON.stringify({
         students: finalStudents, purchases: finalPurchases, attendance: finalAttendance,
         subjects: Array.from(subjSet), teachers: Array.from(teachSet), registrationFees: finalFees,
         sheetUrl: effectiveSheetUrl, autoSync: finalAutoSync, lastSynced: data.lastSynced || null,
+        syncedSnapshot: finalSyncedSnapshot,
       }));
 
       loadedRef.current = true;
@@ -339,7 +374,7 @@ function App() {
   useEffect(() => {
     if (!loadedRef.current) return;
     const t = setTimeout(() => {
-      storageSet(STORAGE_KEY, JSON.stringify({ students, purchases, attendance, subjects, teachers, registrationFees, sheetUrl, autoSync, lastSynced }));
+      storageSet(STORAGE_KEY, JSON.stringify({ students, purchases, attendance, subjects, teachers, registrationFees, sheetUrl, autoSync, lastSynced, syncedSnapshot }));
       if (autoSync && sheetUrl) doSync();
     }, 350);
     return () => clearTimeout(t);
@@ -434,7 +469,9 @@ function App() {
       });
       const now = Date.now();
       setLastSynced(now);
-      storageSet(STORAGE_KEY, JSON.stringify({ students, purchases, attendance, subjects, teachers, registrationFees, sheetUrl, autoSync, lastSynced: now }));
+      const snapshot = { students: students.length, purchases: purchases.length, attendance: attendance.length };
+      setSyncedSnapshot(snapshot);
+      storageSet(STORAGE_KEY, JSON.stringify({ students, purchases, attendance, subjects, teachers, registrationFees, sheetUrl, autoSync, lastSynced: now, syncedSnapshot: snapshot }));
       return true;
     } catch (e) {
       return false;
@@ -2119,6 +2156,9 @@ function BackupView({ students, setStudents, purchases, setPurchases, attendance
             </label>
           </div>
           <div className="text-xs fmono" style={{ color: "var(--ink-soft)" }}>{sheetUrl ? `Connected · last synced ${fmtDateTime(lastSynced)}` : "Not connected yet"}</div>
+          <div className="text-xs" style={{ color: "var(--ink-soft)" }}>
+            As long as auto-sync stays on and finishes before you close the tab, reopening this app anywhere (including a brand-new device via the shareable link) now pulls the latest data automatically — no button needed.
+          </div>
 
           {sheetUrl && (
             <div className="card p-3.5" style={{ background: "var(--teal-tint)", border: "none" }}>
