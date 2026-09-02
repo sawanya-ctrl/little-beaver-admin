@@ -234,6 +234,7 @@ function App() {
   const [sheetUrl, setSheetUrl] = useState("");
   const [autoSync, setAutoSync] = useState(false);
   const [lastSynced, setLastSynced] = useState(null);
+  const [remoteMismatch, setRemoteMismatch] = useState(null);
   const [tab, setTab] = useState("checkin");
   const [selectedStudentId, setSelectedStudentId] = useState(null);
   const loadedRef = useRef(false);
@@ -275,6 +276,21 @@ function App() {
         } catch (e) {
           // no network / sheet not reachable yet — fall back to manual restore in the Backup tab
         }
+      }
+
+      // Already has local data — don't overwrite silently, but check in the
+      // background whether the sheet has a different student count and
+      // surface a banner so mismatches (like syncing from the wrong device)
+      // get noticed immediately instead of being discovered days later.
+      if (!isEmpty && effectiveSheetUrl) {
+        restoreFromSheet(effectiveSheetUrl)
+          .then((remote) => {
+            const remoteCount = (remote.students || []).length;
+            if (remoteCount !== finalStudents.length) {
+              setRemoteMismatch({ remoteCount, localCount: finalStudents.length });
+            }
+          })
+          .catch(() => {});
       }
 
       const subjSet = new Set(finalSubjects);
@@ -339,6 +355,23 @@ function App() {
     return students.find((s) => s.id === id)?.name || "—";
   }
 
+  async function pullFromSheet() {
+    if (!sheetUrl) return false;
+    try {
+      const remote = await restoreFromSheet(sheetUrl);
+      setStudents(remote.students || []);
+      setPurchases(remote.purchases || []);
+      setAttendance(remote.attendance || []);
+      setSubjects(remote.subjects || []);
+      setTeachers(remote.teachers || []);
+      setRegistrationFees(remote.registrationFees || []);
+      setRemoteMismatch(null);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
   async function doSync(skipEmptyGuard) {
     if (!sheetUrl) return false;
     if (!skipEmptyGuard && students.length === 0) {
@@ -399,6 +432,7 @@ function App() {
     purchasesByStudent, usedUnitsByPurchase, remainingOf, capacityOf, studentName,
     selectedStudentId, setSelectedStudentId, setTab,
     sheetUrl, setSheetUrl, autoSync, setAutoSync, lastSynced, doSync,
+    remoteMismatch, setRemoteMismatch, pullFromSheet,
   };
 
   if (loading) {
@@ -417,6 +451,23 @@ function App() {
     <div className="w-full min-h-screen" style={{ background: "var(--bg)", fontFamily: "var(--font-body)" }}>
       <GlobalStyle />
       <Header tab={tab} setTab={setTab} />
+      {remoteMismatch && (
+        <div className="max-w-5xl mx-auto px-4 pt-4">
+          <div className="card p-3.5 flex flex-wrap items-center justify-between gap-3" style={{ background: "var(--amber-tint)", border: "none" }}>
+            <div className="text-sm flex items-start gap-2" style={{ color: "#5A4118" }}>
+              <AlertCircle size={17} className="shrink-0 mt-0.5" />
+              <span>
+                This device shows <strong>{remoteMismatch.localCount}</strong> students, but the connected Google Sheet has <strong>{remoteMismatch.remoteCount}</strong>.
+                One of them is out of date — check which device has the data you expect before deciding.
+              </span>
+            </div>
+            <div className="flex gap-2 shrink-0">
+              <button className="btn btn-ghost px-3 py-2 text-sm" onClick={() => setRemoteMismatch(null)}>Dismiss</button>
+              <button className="btn px-3 py-2 text-sm" style={{ background: "#92651A", color: "white" }} onClick={pullFromSheet}>Use sheet's data</button>
+            </div>
+          </div>
+        </div>
+      )}
       <main className="max-w-5xl mx-auto px-4 pb-16 pt-5">
         {tab === "checkin" && <CheckInView {...ctx} />}
         {tab === "students" && <StudentsView {...ctx} />}
@@ -1984,10 +2035,27 @@ function BackupView({ students, setStudents, purchases, setPurchases, attendance
     setRestoring(false);
   }
 
-  function handleImportPasted() {
+  function mergeRestoredData(data) {
+    const mergeArr = (existingArr, incomingArr) => {
+      const ids = new Set(existingArr.map((x) => x.id));
+      const additions = (incomingArr || []).filter((x) => !ids.has(x.id));
+      return [...existingArr, ...additions];
+    };
+    setStudents((prev) => mergeArr(prev, data.students));
+    setPurchases((prev) => mergeArr(prev, data.purchases));
+    setAttendance((prev) => mergeArr(prev, data.attendance));
+    setRegistrationFees((prev) => mergeArr(prev, data.registrationFees));
+    setSubjects((prev) => Array.from(new Set([...prev, ...(data.subjects || [])])));
+    setTeachers((prev) => Array.from(new Set([...prev, ...(data.teachers || [])])));
+    setRestoredOk(true);
+    setTimeout(() => setRestoredOk(false), 3000);
+  }
+
+  function handleImportPasted(mode) {
     try {
       const data = JSON.parse(pasteText);
-      applyRestoredData(data);
+      if (mode === "merge") mergeRestoredData(data);
+      else applyRestoredData(data);
       setPasteText("");
       setShowPasteRestore(false);
       setRestoreError("");
@@ -2093,7 +2161,17 @@ function BackupView({ students, setStudents, purchases, setPurchases, attendance
                 Click "Open backup link" above — it opens the raw backup JSON in a new tab. Select all (Ctrl/Cmd+A), copy, and paste it below.
               </div>
               <textarea className="input w-full px-3 py-2.5 text-xs fmono" style={{ minHeight: 100 }} placeholder='{"students": [...], ...}' value={pasteText} onChange={(e) => setPasteText(e.target.value)} />
-              <button className="btn btn-primary px-4 py-2.5 text-sm w-fit" onClick={handleImportPasted} disabled={!pasteText.trim()} style={{ opacity: pasteText.trim() ? 1 : 0.45 }}>Import pasted backup</button>
+              <div className="flex flex-wrap gap-2">
+                <button className="btn px-4 py-2.5 text-sm w-fit" style={{ background: "var(--teal)", color: "white", opacity: pasteText.trim() ? 1 : 0.45 }} onClick={() => handleImportPasted("merge")} disabled={!pasteText.trim()}>
+                  Merge in (add only, keep existing)
+                </button>
+                <button className="btn btn-ghost px-4 py-2.5 text-sm w-fit" style={{ opacity: pasteText.trim() ? 1 : 0.45 }} onClick={() => handleImportPasted("replace")} disabled={!pasteText.trim()}>
+                  Replace everything
+                </button>
+              </div>
+              <div className="text-xs" style={{ color: "var(--ink-soft)" }}>
+                Use <strong>Merge in</strong> to add missing students/packages without touching what's already here. Use <strong>Replace everything</strong> only when you want this device to exactly match the pasted backup.
+              </div>
             </div>
           )}
         </div>
