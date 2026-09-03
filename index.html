@@ -72,17 +72,27 @@ const APPS_SCRIPT_CODE = `function doPost(e) {
   var payload = JSON.parse(e.postData.contents);
   var ss = SpreadsheetApp.getActiveSpreadsheet();
 
-  // Safety net: refuse to overwrite existing data with an empty sync
-  // (e.g. syncing from a brand-new device before its local data is restored).
+  // Safety net: refuse syncs that would make the data shrink drastically —
+  // whether all the way to empty (a fresh device before it's restored) or
+  // just back down to some old, stale snapshot (a device that was left open
+  // with auto-sync on and never got updated). A small drop (e.g. deleting
+  // one student) is still allowed; only a big sudden drop gets blocked.
   var backupSheet = ss.getSheetByName('_Backup') || ss.insertSheet('_Backup');
   var existingRaw = backupSheet.getRange('A1').getValue();
-  var existingCount = 0;
+  var existing = { students: [], purchases: [], attendance: [] };
   if (existingRaw) {
-    try { existingCount = (JSON.parse(existingRaw).students || []).length; } catch (parseErr) {}
+    try {
+      var parsed = JSON.parse(existingRaw);
+      existing.students = parsed.students || [];
+      existing.purchases = parsed.purchases || [];
+      existing.attendance = parsed.attendance || [];
+    } catch (parseErr) {}
   }
-  var incomingCount = (payload.students || []).length;
-  if (incomingCount === 0 && existingCount > 0) {
-    return ContentService.createTextOutput('BLOCKED_EMPTY_OVERWRITE');
+  var existingTotal = existing.students.length + existing.purchases.length + existing.attendance.length;
+  var incomingTotal = (payload.students || []).length + (payload.purchases || []).length + (payload.attendance || []).length;
+  var DROP_TOLERANCE = 5; // allow small legitimate edits/deletions through
+  if (existingTotal > 0 && incomingTotal < existingTotal - DROP_TOLERANCE) {
+    return ContentService.createTextOutput('BLOCKED_DATA_SHRINK:' + incomingTotal + '/' + existingTotal);
   }
 
   writeSheet(ss, 'Students',
