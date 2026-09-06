@@ -78,7 +78,12 @@ const APPS_SCRIPT_CODE = `function doPost(e) {
   // with auto-sync on and never got updated). A small drop (e.g. deleting
   // one student) is still allowed; only a big sudden drop gets blocked.
   var backupSheet = ss.getSheetByName('_Backup') || ss.insertSheet('_Backup');
-  var existingRaw = backupSheet.getRange('A1').getValue();
+  var existingRaw = '';
+  var existingLastRow = backupSheet.getLastRow();
+  if (existingLastRow > 0) {
+    var existingValues = backupSheet.getRange(1, 1, existingLastRow, 1).getValues();
+    existingRaw = existingValues.map(function (row) { return row[0]; }).join('');
+  }
   var existing = { students: [], purchases: [], attendance: [] };
   if (existingRaw) {
     try {
@@ -128,8 +133,20 @@ const APPS_SCRIPT_CODE = `function doPost(e) {
     })
   );
 
-  // Full raw snapshot for restore — this is what "Restore from Google Sheet" reads back.
-  backupSheet.getRange('A1').setValue(payload.rawState || '');
+  // Full raw snapshot for restore — split across multiple cells, since a
+  // single Google Sheets cell can only hold 50,000 characters and this JSON
+  // easily exceeds that once there's real history. Writing it as one big
+  // value used to fail silently past that limit, leaving restore stuck on
+  // old data even though the visible tabs above were updating fine.
+  var raw = payload.rawState || '';
+  var CHUNK_SIZE = 45000;
+  var chunks = [];
+  for (var i = 0; i < raw.length; i += CHUNK_SIZE) {
+    chunks.push([raw.substring(i, i + CHUNK_SIZE)]);
+  }
+  if (chunks.length === 0) chunks = [['']];
+  backupSheet.clearContents();
+  backupSheet.getRange(1, 1, chunks.length, 1).setValues(chunks);
   try { backupSheet.hideSheet(); } catch (hideErr) {}
 
   return ContentService.createTextOutput('OK');
@@ -138,7 +155,14 @@ const APPS_SCRIPT_CODE = `function doPost(e) {
 function doGet(e) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var backupSheet = ss.getSheetByName('_Backup');
-  var raw = backupSheet ? backupSheet.getRange('A1').getValue() : '';
+  var raw = '';
+  if (backupSheet) {
+    var lastRow = backupSheet.getLastRow();
+    if (lastRow > 0) {
+      var values = backupSheet.getRange(1, 1, lastRow, 1).getValues();
+      raw = values.map(function (row) { return row[0]; }).join('');
+    }
+  }
   return ContentService.createTextOutput(raw || '{}').setMimeType(ContentService.MimeType.JSON);
 }
 
